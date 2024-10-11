@@ -5,7 +5,7 @@
 %define _prefix %{component_prefix}/%{_build_id}
 
 Name: %{product}-%{component}
-Version: 2.0.1
+Version: 2.1.0
 Release: %(echo ${BUILD_METADATA})
 Group: System Environment/Libraries
 License: BSD
