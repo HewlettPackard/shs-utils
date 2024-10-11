@@ -1,0 +1,13 @@
+#!/usr/bin/env groovy
+
+@Library('dst-shared@master') _
+@Library('CrayNetworkCI@master') _x
+
+rpmBuild(
+    product: "slingshot-host-software",
+    // The obs_target_os structure contains [ obsTargetOS, [fanout_params], target_node ]
+    obs_target_os: obsTargetOs("hpc-shs-utils"),
+    slack_notify: ["", "", "false", "false", "true", "true"],
+    manifestGen: "true",
+    build_arch: "noarch"
+)

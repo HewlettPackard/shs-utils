@@ -1,0 +1,1159 @@
+#!/usr/bin/env bash
+#
+# Copyright 2021-2022 Hewlett Packard Enterprise Development LP. All rights reserved.
+#
+
+########################################################################
+
+scriptname=$(echo ${0##*/} | sed -e 's/\.sh$//g' -e 'y/ -/__/')
+
+########################################################################
+
+export PATH=/usr/sbin:/sbin:${PATH}
+
+if [ ${EUID} -ne 0 ]
+then
+    printf '%s: please run this script as root. Exiting.\n' "${scriptname}"
+    exit 255
+fi
+
+########################################################################
+
+HELP=0
+DEBUG=0
+VERBOSE=0
+WARN_COUNT=0
+ERROR_COUNT=0
+
+mlx_cmd_present=0
+cxi_cmd_present=0
+hpcm_dev_managed=0
+
+declare -A devlist
+devlist[ss10_count]=0
+devlist[ss11_count]=0
+
+rpm_list_common="\
+ libfabric\
+"
+
+rpm_list_common_optional="\
+ libfabric-devel\
+"
+
+rpm_list_ss10="\
+ mlnx-ofa_kernel\
+ rdma-core\
+"
+
+rpm_list_ss10_optional="\
+"
+
+rpm_list_ss11="\
+ cray-cxi-driver-udev\
+ cray-diags-fabric\
+ cray-hms-firmware\
+ cray-libcxi\
+ cray-libcxi-retry-handler\
+ cray-slingshot-base-link-kmp-cray_shasta_c\
+ slingshot-firmware-cassini\
+ slingshot-firmware-management\
+ slingshot-network-config\
+"
+
+rpm_list_ss11_optional="\
+ cray-cassini-headers-user\
+ cray-cassini-libcsrmap\
+ cray-cxi-driver-devel\
+ cray-cxi-driver-kmp-cray_shasta_c\
+ cray-kfabric-devel\
+ cray-kfabric-kmp-cray_shasta_c\
+ cray-kfabric-udev\
+ cray-libcxi-devel\
+ cray-libcxi-dracut\
+ cray-libcxi-utils\
+ cray-slingshot-base-link-devel\
+ slingshot-utils\
+"
+
+rpm_list_all="\
+ ${rpm_list_common}\
+ ${rpm_list_common_optional}\
+ ${rpm_list_ss10}\
+ ${rpm_list_ss10_optional}\
+ ${rpm_list_ss11}\
+ ${rpm_list_ss11_optional}
+"
+
+########################################################################
+
+net_dev_entries="
+ carrier_changes\
+ device/aer_dev_correctable\
+ device/aer_dev_nonfatal\
+ device/aer_dev_fatal\
+ device/config\
+ device/current_link_speed\
+ device/current_link_width\
+ device/consistent_dma_mask_bits\
+ device/dma_mask_bits\
+ device/uevent\
+ device/vendor\
+"
+
+########################################################################
+
+prefix_printf()
+{
+    local prefix=${1?}
+    shift
+    printf "${@}" | sed -e "s/^/${prefix}: /g"
+}
+
+msg()
+{
+    printf "${@}"
+}
+
+msg_verbose()
+{
+    if [ ${VERBOSE} -ne 0 ]
+    then
+        prefix_printf INFO "${@}"
+    fi
+}
+
+msg_debug()
+{
+    if [ ${DEBUG} -ne 0 ]
+    then
+        prefix_printf DEBUG "${@}"
+    fi
+}
+
+msg_warn()
+{
+    WARN_COUNT=$((WARN_COUNT+1))
+    prefix_printf WARN "${@}"
+}
+
+msg_error()
+{
+    ERROR_COUNT=$((ERROR_COUNT+1))
+    prefix_printf ERROR "${@}"
+}
+
+msg_diag()
+{
+    prefix_printf DIAG "${@}"
+}
+
+########################################################################
+
+#
+# to grep all files recursively from "${@}"
+# with the output as "filename: data" where filename is not a pathname
+#
+grep_deep_grab()
+{
+    grep -H -s -E -e . -r "${@}" \
+            | sed -e 's,^.*/\([^/:]*\):\(.*\)$,\1: \2,g'
+}
+
+#
+# to grep only files in "${@}" without recursing into subdirs
+# _and_ to avoid shell file-glob from being too large for a single line
+# with the output as "filename: data" where filename is not a pathname
+#
+grep_shallow_grab()
+{
+    find "${@}" -maxdepth 1 -type f -print0 \
+            | xargs --null grep -H -s -E -e . '{}' \
+            | sed -e 's,^.*/\([^/:]*\):\(.*\)$,\1: \2,g'
+}
+
+########################################################################
+
+devlist_populate()
+{
+    local rtn_name='devlist_populate'
+    local i=''
+    local dev=''
+    local line=''
+    local lhs=''
+    local rhs=''
+    local tmp=''
+
+    # Find all the HSN interfaces if not already specified on the command line.
+    if [ -z "${devlist[devices]}" ]; then
+        for i in $(grep -l -E -e 'DRIVER=(cxi_ss1|mlx5_core)\s*$' /sys/class/net/*/device/uevent 2>/dev/null)
+        do
+            tmp=${i#/sys/class/net/}
+            dev=${tmp%/device/uevent}
+            devlist[devices]+="${dev} "
+        done
+    fi
+
+    for dev in ${devlist[devices]}
+    do
+        while read line
+        do
+            msg_debug 'line="%s"\n' "${line}"
+            lhs=${line%%=*}
+            rhs=${line#*=}
+            msg_debug 'lhs="%s" rhs="%s"\n' "${lhs}" "${rhs}"
+            devlist[${dev},"${lhs}"]="${rhs}"
+            case "${line}" in
+                DRIVER=cxi_ss1)
+                    devlist[ss11_count]=$((${devlist[ss11_count]}+1))
+                    devlist[${dev},type]=ss11
+                    devlist[${dev},sub_dev]=$(ls /sys/class/net/${dev}/device/cxi)
+                    ;;
+                DRIVER=mlx5_core)
+                    devlist[ss10_count]=$((${devlist[ss10_count]}+1))
+                    devlist[${dev},type]=ss10
+                    if type mst >/dev/null 2>&1
+                    then
+                        mst start >/dev/null
+                        devlist[${dev},dev_name]=$(mst status -v | grep ${dev} | awk '{print $3}')
+                        mst stop >/dev/null
+                    fi
+                    ;;
+                *)
+                    ;;
+            esac
+        done < /sys/class/net/${dev}/device/uevent
+    done
+}
+
+########################################################################
+
+devlist_show()
+{
+    local i=''
+
+    msg_debug '${devlist[ss10_count]}=%d\n' ${devlist[ss10_count]}
+    msg_debug '${devlist[ss11_count]}=%d\n' ${devlist[ss11_count]}
+    msg_debug '\n'
+    for i in ${!devlist[@]}
+    do
+        msg_debug '${devlist[%s]}=%s\n' "${i}" "${devlist[${i}]}"
+    done
+    msg_debug '\n'
+    for i in ${devlist[devices]}
+    do
+        msg_debug '${devlist[%s,DRIVER]}=%s\n'        "${i}" "${devlist[${i},DRIVER]}"
+        msg_debug '${devlist[%s,PCI_SLOT_NAME]}=%s\n' "${i}" "${devlist[${i},PCI_SLOT_NAME]}"
+        msg_debug '\n'
+    done
+}
+
+slingshot_devices()
+{
+    msg 'devices: %s\n' "${devlist[devices]}"
+}
+
+########################################################################
+
+slingshot_utils_usage()
+{
+    msg 'USAGE: slingshot-utils [OPTIONS] ARGS SUB-COMMAND [SUB-COMMAND-PARAMS...]\n'
+    msg '\n'
+    msg 'OPTIONS:\n'
+    msg '    -d | --debug            print debug messages\n'
+    msg '    -h | --help             print help\n'
+    msg '    -v | --verbose          increase verbosity\n'
+    msg '    -i | --iface <iface>    specify iface(s) to test\n'
+    msg '\n'
+    msg 'SUB-COMMANDs:\n'
+    msg '    devices                 list devices\n'
+    msg '    diag                    basic diagnostics\n'
+    msg '    snapshot                create a snapshot\n'
+    msg '\n'
+}
+
+########################################################################
+
+slingshot_utils_initialize()
+{
+    devlist_populate
+    if [ ${DEBUG} -ne 0 ]
+    then
+        devlist_show
+    fi
+
+    #
+    # use mst as an indicator mellanox tools are installed
+    #
+    if type mst >/dev/null 2>&1
+    then
+        mlx_cmd_present=1
+        msg_verbose 'Mellanox tools found\n'
+    else
+        mlx_cmd_present=0
+        msg_verbose 'Mellanox tools NOT found\n'
+    fi
+    msg_debug 'mlx_cmd_present=%d\n' ${mlx_cmd_present}
+    if [  ${devlist[ss10_count]} -ne 0 ] && [ ${mlx_cmd_present} -eq 0 ]
+    then
+        msg_warn 'Mellanox devices detected but the Mellanox tools do not appear to be installed. Please examine the list of installed tools on this node to verify that the host contains the correct tools.\n'
+    fi
+
+    #
+    # use cxi_stat for now as an indicator ss11 tools are installed
+    #
+    if type cxi_stat >/dev/null 2>&1
+    then
+        cxi_cmd_present=1
+        msg_verbose 'Cassini tools found\n'
+    else
+        cxi_cmd_present=0
+        msg_verbose 'Cassini tools NOT found\n'
+    fi
+    msg_debug 'cxi_cmd_present=%d\n' ${cxi_cmd_present}
+    if [ ${devlist[ss11_count]} -ne 0 ] && [ ${cxi_cmd_present} -eq 0 ]
+    then
+        msg_warn 'Cassini devices detected but the Cassini Slingshot11 tools do not appear to be installed. Please examine the list of installed tools on this node to verify that the host contains the correct tools.\n'
+    fi
+
+    #
+    # Check if system is HPCM managed or not
+    #
+    if type cm >/dev/null 2>&1
+    then
+        hpcm_dev_managed=1
+        msg_verbose 'The system is using HPCM device management\n'
+    else
+        hpcm_dev_managed=0
+        msg_verbose 'The system is _NOT_ using HPCM device management\n'
+    fi
+    msg_debug 'hpcm_dev_managed=%d\n' ${hpcm_dev_managed}
+}
+
+########################################################################
+
+read_aer_sysfs()
+{
+    local device=${1}
+    local aer_type=${2}
+    local threshold=${3}
+    local threshold_exceeded=0
+    local f=/sys/class/net/${device}/device/${aer_type}
+    local counter=''
+    local value=''
+
+    cat ${f} | while read -r counter value
+    do
+        msg_debug 'counter=%s value=%d threshold=%d\n' ${counter} ${value} ${threshold}
+        if [ ${value} -ge ${threshold} ]
+        then
+            msg_warn 'PCI AER threshold exceeded for device %s on counter %s\n' ${device} ${counter}
+            msg_warn '%s/%s events=%s threshold=%s\n' ${aer_type} ${counter} ${value} ${threshold}
+            threshold_exceeded=$((${threshold_exceeded}+1))
+        fi
+    done
+    msg_debug 'threshold_exceeded=%d\n' ${threshold_exceeded}
+    if [ ${threshold_exceeded} -ne 0 ]
+    then
+        msg_diag 'Device %s may not be operating properly.\n'  ${device}
+        msg_diag 'This node may not be healthy. Consider removing it from active workqueues\n'
+        msg_diag 'Recommendation: Reseating or replacing the device may resolve the problem\n'
+        msg_diag 'Recommendation: Consider removing this node from active work/batch queues\n'
+    fi
+}
+
+check_aer_errors()
+{
+    local device=${1}
+    local aer_type=''
+    local warning_threshold=10
+
+    #
+    # see https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-bus-pci-devices-aer_stats
+    #
+    msg_verbose 'checking for PCI AER errors on device %s\n' "${device}"
+    for aer_type in aer_dev_correctable aer_dev_nonfatal aer_dev_fatal
+    do
+        if [ ! -f /sys/class/net/${device}/device/${aer_type} ]
+        then
+            msg_debug 'device %s does not report AER. skipping...\n' ${device}
+            break
+        fi
+        warning_threshold=10
+        case ${aer_type} in
+            aer_dev_nonfatal)
+                warning_threshold=5
+                ;;
+            aer_dev_fatal)
+                warning_threshold=1
+                ;;
+            *)
+                ;;
+        esac
+        read_aer_sysfs "${device}" "${aer_type}" ${warning_threshold}
+    done
+}
+
+########################################################################
+
+check_mac_address()
+{
+    local device=${1}
+    local dev_mac=''
+    local neigh_mac=''
+    local LOCAL_SYSTEM_TLV=''
+
+    msg_verbose 'checking for valid mac addresses for %s\n' ${device}
+    dev_mac=$(ip -br link show ${device} | awk '{print $3}')
+    neigh_mac=$(lldptool -n -i ${device} -t | grep MAC | head -n1 | awk '{print $2}')
+    msg_debug '  dev_mac=%s\nneigh_mac=%s\n' "${dev_mac}" "${neigh_mac}"
+    case "${dev_mac},${neigh_mac}" in
+        ,*)
+            msg_warn 'MAC address for device %s not found\n' ${device}
+            ;;
+        00:00:00:00:00:00,*)
+            msg_warn 'MAC address for device %s is empty\n' ${device}
+            msg_diag 'Contact support for next steps to initialize the adapter with a valid MAC address\n'
+            ;;
+        #
+        # not all AMAs start with '02' but they must have local admin bit set.
+        #
+        [0-9a-zA-Z][26aAeE]:00:*,[0-9a-zA-Z][26aAeE]:[Ff][Ee]:*)
+            if [ "${neigh_mac:0:2}" != "${dev_mac:0:2}" ] \
+                   || [ "${neigh_mac:6}" != "${dev_mac:6}" ]
+            then
+                msg_warn 'AMA for device %s does not match switch port ID\n' ${device}
+                msg_diag 'Contact support for next steps to initialize the adapter with a valid AMA\n'
+            fi
+            ;;
+        [0-9a-zA-Z][26aAeE]:00:*,)
+            msg_warn 'device %s lldp neighbor MAC address not found\n' ${device}
+            msg_diag 'Contact support for next steps.\n'
+            ;;
+        [0-9a-zA-Z][26aAeE]:00:*,*)
+            msg_warn 'device %s lldp neighbor MAC address "%s" is not an AMA\n' ${device} ${neigh_mac}
+            msg_diag 'Contact support for next steps.\n'
+            ;;
+        *)
+            msg_warn 'device %s MAC address %s is not an AMA\n' ${device} ${dev_mac}
+            msg_diag 'Contact support for next steps.\n'
+            ;;
+    esac
+    if [ ${hpcm_dev_managed} -ne 0 ]
+    then
+        msg_verbose 'No TLV info, system is HPCM'
+    else
+        # Check if advertised org-specific TLV matches adapter settings
+        # Get TLV info, decode payload, and print payload's inet info
+        LOCAL_SYSTEM_TLV=$(lldptool -t -n -i ${device} | grep Info | head -n1 | awk '{print $6}' | xxd -p -r | awk -F '"' '{print $4}')
+        # Ensure device produces org-specific info at all, then compare
+        ip a s ${device} | grep 'inet ' | awk '{print $2}' | grep "${LOCAL_SYSTEM_TLV}" >/dev/null
+        if [ $? -ne 0 ]
+        then
+            msg_warn 'The advertised TLV ID does not match %s adapter settings\n' ${device}
+            msg_diag 'Contact support for next steps to initialize the adapter\n'
+        fi
+    fi
+}
+
+########################################################################
+
+check_for_routing_rules()
+{
+    local DIAG_RUN_SCRIPT=false
+    local LOCAL_ROUTE_LOOPBACK=$(ip rule | grep -oE "[0-9]+:.*\b([0-9]{1,3}\.){3}[0-9]{1,3}\b to \b([0-9]{1,3}\.){3}[0-9]{1,3}\b lookup local" | wc -l)
+    local LOCAL_INBOUND_DEV_LOOPBACK=$(ip rule | grep -oE "[0-9]+:.*\b([0-9]{1,3}\.){3}[0-9]{1,3}\b iif [a-zA-Z0-9]+ lookup local" | wc -l)
+    local LOCAL_DEV_NETWORK_OUTBOUND=$(ip rule | grep -oE "[0-9]+:.*\b([0-9]{1,3}\.){3}[0-9]{1,3}\b lookup rt_hsn[0-9]" | wc -l)
+    local NUMBER_OF_INTERFACES=$(ls /sys/class/net/ | grep hsn | wc -l)
+
+    if [ ${LOCAL_ROUTE_LOOPBACK} -eq 0 ]
+    then
+        msg_warn 'No local route loopback rules detected for hsn devices from slingshot-ifroute'
+        DIAG_RUN_SCRIPT=true
+    fi
+
+    if [ ${NUMBER_OF_INTERFACES} -gt 1 ]
+    then
+        # don't check if it only got one interface but do check if it has more than one interfaces
+        if [ ${LOCAL_INBOUND_DEV_LOOPBACK} -eq 0 ]
+        then
+            msg_warn 'No local route with inbound device loopback rules detected for hsn devices from slingshot-ifroute'
+            DIAG_RUN_SCRIPT=true
+        fi
+    fi
+
+    if [ ${LOCAL_DEV_NETWORK_OUTBOUND} -eq 0 ]
+    then
+        msg_warn 'No local device egress routing rules detected for hsn devices from slingshot-ifroute'
+        DIAG_RUN_SCRIPT=true
+    fi
+
+    if ${DIAG_RUN_SCRIPT}
+    then
+        msg_diag 'slingshot routing rules for ingress/egress rules on interfaces has not been run'
+        msg_diag 'Recommendation: run /usr/bin/slingshot-ifroute'
+    fi
+}
+
+########################################################################
+
+check_for_rpms()
+{
+    local r=''
+    local retval=0
+    local num_missing=0
+    local rpms_missing=''
+
+    msg_debug 'check for rpms\n'
+    if [ -n "${rpm_list_common}" ]
+    then
+        msg_verbose 'Checking for common Slingshot RPMs\n'
+        for r in ${rpm_list_common}
+        do
+            rpm -q ${r} >/dev/null 2>&1
+            retval=${?}
+            msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
+            if [ ${retval} -ne 0 ]
+            then
+                num_missing=$((${num_missing}+1))
+                rpms_missing+="${r} "
+                msg_warn 'Common Slingshot RPM not detected: %s\n' ${r}
+            fi
+        done
+    else
+        msg_debug 'common Slingshot RPM list is empty.\n'
+    fi
+    if [ -n "${rpm_list_common_optional}" ]
+    then
+        msg_verbose 'Checking for optional common Slingshot RPMs\n'
+        for r in ${rpm_list_common_optional}
+        do
+            rpm -q ${r} >/dev/null 2>&1
+            retval=${?}
+            msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
+            if [ ${retval} -eq 0 ]
+            then
+                msg_verbose 'Optional common Slingshot RPM was detected: %s\n' ${r}
+            fi
+        done
+    else
+        msg_debug 'common Slingshot optional RPM list is empty.\n'
+    fi
+
+    if [ ${devlist[ss10_count]} -eq 0 ]
+    then
+        msg_verbose 'No Mellanox interfaces detected.  Skipping check for Mellanox RPMs\n'
+    else
+        if [ -n "${rpm_list_ss10}" ]
+        then
+            msg_verbose 'Checking for Mellanox RPMs\n'
+            for r in ${rpm_list_ss10}
+            do
+                rpm -q ${r} >/dev/null 2>&1
+                retval=${?}
+                msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
+                if [ ${retval} -ne 0 ]
+                then
+                    num_missing=$((${num_missing}+1))
+                    rpms_missing+="${r} "
+                    msg_warn 'Mellanox RPM not detected: %s\n' ${r}
+                fi
+            done
+        else
+            msg_debug 'Mellanox RPM list is empty.\n'
+        fi
+        if [ -n "${rpm_list_ss10_optional}" ]
+        then
+            msg_verbose 'Checking for optional Mellanox RPMs\n'
+            for r in ${rpm_list_ss10_optional}
+            do
+                rpm -q ${r} >/dev/null 2>&1
+                retval=${?}
+                msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
+                if [ ${retval} -ne 0 ]
+                then
+                    msg_verbose 'Optional Mellanox RPM was detected: %s\n' ${r}
+                fi
+            done
+        else
+            msg_debug 'Mellanox optional RPM list is empty.\n'
+        fi
+    fi
+
+    if [ ${devlist[ss11_count]} -eq 0 ]
+    then
+        msg_verbose 'No Cassini interfaces detected.  Skipping check for Cassini RPMs\n'
+    else
+        if [ -n "${rpm_list_ss11}" ]
+        then
+            msg_verbose 'Checking for Cassini RPMs\n'
+            for r in ${rpm_list_ss11}
+            do
+                rpm -q ${r} >/dev/null 2>&1
+                retval=${?}
+                msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
+                if [ ${retval} -ne 0 ]
+                then
+                    num_missing=$((${num_missing}+1))
+                    rpms_missing+="${r} "
+                    msg_warn 'Cassini RPM not detected: %s\n' ${r}
+                fi
+            done
+        else
+            msg_debug 'Cassini RPM list is empty.\n'
+        fi
+
+        if [ -n "${rpm_list_ss11_optional}" ]
+        then
+            msg_verbose 'Checking for optional Cassini RPMs\n'
+            for r in ${rpm_list_ss11_optional}
+            do
+                rpm -q ${r} >/dev/null 2>&1
+                retval=${?}
+                msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
+                if [ ${retval} -eq 0 ]
+                then
+                    msg_verbose 'Optional Cassini RPM was detected: %s\n' ${r}
+                fi
+            done
+        else
+            msg_debug 'Cassini optional RPM list is empty.\n'
+        fi
+    fi
+
+    msg_debug 'num_missing=%d\n' ${num_missing}
+    if [ ${num_missing} -ne 0 ]
+    then
+        msg_warn '%d required RPMs were not detected.  Contact Support for installation steps.\n' ${num_missing}
+        msg_warn 'missing RPMs: %s\n' "${rpms_missing}"
+    fi
+}
+
+########################################################################
+
+check_for_openibd_failure()
+{
+    local status=$(systemctl status openibd 2>/dev/null| egrep -o 'Active: ([a-z]+)' | awk '{print $2}')
+
+    if [ "${status}" != "active" ]
+    then
+        msg_warn 'openibd service is not active, status="%s"\n' "${status}"
+        msg_diag 'run "journalctl -xe -u openibd" to check for possible errors in log\n'
+    fi
+}
+
+########################################################################
+
+mlxlink()
+{
+    local dev=${1:?}
+    local dev_name=${devlist[${dev},dev_name]}
+
+    if [ ${mlx_cmd_present} -ne 0 ]
+    then
+        msg '\n== mlxlink %s (%s) ==\n' "${dev}" "${dev_name}"
+        command mlxlink -d ${dev_name}
+        msg '\n'
+    else
+        msg_warn 'mlx commands not installed\n'
+    fi
+}
+
+mlxuptime()
+{
+    local dev=${1:?}
+    local dev_name=${devlist[${dev},dev_name]}
+
+    if [ ${mlx_cmd_present} -ne 0 ]
+    then
+        msg '\n== mlxuptime %s (%s) ==\n' "${dev}" "${dev_name}"
+        command mlxuptime -d ${dev_name}
+        msg '\n'
+    else
+        msg_warn 'mlx commands not installed\n'
+    fi
+}
+
+check_mlx_status()
+{
+    local dev=${1}
+    local dev_name=${devlist[${dev},dev_name]}
+    local mlx_status_check=0
+
+    mlx_status_check=$(command mlxlink -d ${dev_name} | grep -E 'Status Opcode' | awk -F ': ' '{printf "%d", $2;}')
+    msg_debug '%s (%s): mlx_status_check="%d"\n' "${dev}" "${dev_name}" "${mlx_status_check}"
+    if [ ${mlx_status_check} -ne 0 ]
+    then
+        mlxlink ${dev}
+        mlxuptime ${dev}
+    fi
+}
+
+check_cxi_status()
+{
+    local dev=${1}
+
+    msg '%s[%s]:\n' "${devlist[${dev},sub_dev]}" "${dev}"
+    cxi_stat --device=${devlist[${dev},sub_dev]} --rates
+    msg '\n'
+}
+
+########################################################################
+
+slingshot_diag()
+{
+    local dev=''
+    local retval=0
+
+    check_for_routing_rules
+    check_for_rpms
+    for dev in ${devlist[devices]}
+    do
+        check_aer_errors ${dev}
+        check_mac_address ${dev}
+        case "${devlist[${dev},DRIVER]}" in
+            mlx5_core)
+                check_for_openibd_failure
+                if [ ${mlx_cmd_present} -ne 0 ]
+                then
+                    msg_debug 'check mlx status\n'
+                    check_mlx_status ${dev}
+                fi
+                ;;
+            cxi_ss1)
+                if [ ${cxi_cmd_present} -ne 0 ]
+                then
+                    msg_debug 'check cxi status\n'
+                    check_cxi_status ${dev}
+                fi
+                ;;
+        esac
+    done
+
+    if [ ${WARN_COUNT} -gt 0 ] || [ ${ERROR_COUNT} -gt 0 ]
+    then
+        msg_diag 'Recommendation: run /usr/sbin/slingshot-snapshot and provide tarball to support\n'
+    fi
+
+    if [ ${WARN_COUNT} -gt 0 ]
+    then
+        retval=1
+    fi
+
+    if [ ${ERROR_COUNT} -gt 0 ]
+    then
+        retval=2
+    fi
+
+    return ${retval}
+}
+
+########################################################################
+
+dev_sriov()
+{
+    local dev=${1?}
+    grep_deep_grab  /sys/class/net/${dev}/device/sriov*
+}
+
+dev_properties()
+{
+    local dev=${1?}
+    grep_deep_grab  /sys/class/net/${dev}/device/properties
+}
+
+print_counters()
+{
+    grep_shallow_grab "${@}"
+}
+
+lspci_vvv()
+{
+    local dev=${1:?}
+    local bus_addr=${devlist[${dev},PCI_SLOT_NAME]}
+    lspci -vvv -s ${bus_addr}
+}
+
+counters_statistics()
+{
+    local dev=${1:?}
+
+    if [ -d /sys/class/net/${dev}/statistics ]
+    then
+        print_counters /sys/class/net/${dev}/statistics
+    else
+        msg_warn '/sys/class/net/%s/statistics not available\n' "${dev}"
+    fi
+}
+
+counters_debug()
+{
+    local dev=${1:?}
+
+    if [ -d /sys/class/net/${dev}/debug ]
+    then
+        print_counters /sys/class/net/${dev}/debug
+    else
+        msg_warn '/sys/class/net/%s/debug not available\n' "${dev}"
+    fi
+}
+
+get_counters_ib()
+{
+    local dev=${1:?}
+    local cntr=''
+    local ib_dev=''
+    local port=''
+
+    if [ -n "${2}" ]
+    then
+        cntr="/${2}"
+    fi
+    for ib_dev in /sys/class/net/${dev}/device/infiniband/*
+    do
+        for port in ${ib_dev}/ports/*
+        do
+            print_counters ${port}${cntr}
+        done
+    done
+}
+
+counters_ib_stats()
+{
+    local dev=${1:?}
+    get_counters_ib ${dev} ''
+}
+
+counters_ib_counters()
+{
+    local dev=${1:?}
+    get_counters_ib ${dev} counters
+}
+
+counters_ib_hw_counters()
+{
+    local dev=${1:?}
+    get_counters_ib ${dev} hw_counters
+}
+
+counters_cxi_telemetry()
+{
+    local dev=${1:?}
+
+    if [ -d /sys/class/net/${dev}/device/telemetry ]
+    then
+        grep -E -e . -r /sys/class/net/${dev}/device/telemetry --exclude='ALL-in-binary' \
+                | sed -e 's,^.*/\([^/:]*\):\(.*\)$,\1: \2,g' \
+                | sort
+    fi
+}
+
+firmware_version()
+{
+    local dev=${1:?}
+    local mst_device=''
+
+    case ${devlist[${dev},DRIVER]} in
+        mlx5_core)
+            if [ ${mlx_cmd_present} -ne 0 ]
+            then
+                mst start >/dev/null
+                mst_device=$(mst status -v | grep ${dev} | awk '{print $2}')
+                mlxfwmanager -d ${mst_device} --query
+                mst stop >/dev/null
+            else
+                msg_warn 'mlx commands not installed\n'
+            fi
+            ;;
+        cxi_ss1)
+            msg_warn 'cxi device %s[%s] currently not supported\n' "${devlist[${dev},sub_dev]}" "${dev}"
+            ;;
+        *)
+            msg_warn 'device %s is unsupported\n' "${dev}"
+            ;;
+    esac
+}
+
+firmware_config()
+{
+    local dev=${1}
+    local mst_device=''
+
+    case ${devlist[${dev},DRIVER]} in
+        mlx5_core)
+            if [ ${mlx_cmd_present} -ne 0 ]
+            then
+                mst start >/dev/null
+                mst_device=$(mst status -v | grep ${dev} | awk '{print $2}')
+                mlxconfig -d ${mst_device} query
+                mst stop >/dev/null
+            else
+                msg_warn 'mlx commands not installed\n'
+            fi
+            ;;
+        cxi_ss1)
+            msg_warn 'cxi device %s[%s] currently not supported\n' "${devlist[${dev},sub_dev]}" "${dev}"
+            ;;
+        *)
+            msg_warn 'device %s is unsupported\n' "${dev}"
+            ;;
+    esac
+}
+
+########################################################################
+# SYSTEM COMMANDS
+
+mst_status()
+{
+    if [ ${mlx_cmd_present} -ne 0 ]
+    then
+        mst start >/dev/null
+        mst status -v
+        mst stop >/dev/null
+    else
+        msg_warn 'mlx commands not installed\n'
+    fi
+}
+
+mlx_cables()
+{
+    if [ ${mlx_cmd_present} -ne 0 ]
+    then
+        mst start >/dev/null
+        mst cable add --with_ib
+        mlxcables
+        mst stop >/dev/null
+    else
+        msg_warn 'mlx commands not installed\n'
+    fi
+}
+
+########################################################################
+
+slingshot_snapshot()
+{
+    local snapshot_dir=''
+    local dev=''
+    local ent=''
+    local sysfs_entry=''
+    local tmp=''
+    local dkms_tree=''
+    local dkms_source_tree=''
+    local dkms_dirs=''
+
+    snapshot_dir=/tmp/slingshot-$(hostname)-$(date -u +'%Y%m%d-%H%M%SUTC')
+
+    mkdir -p ${snapshot_dir}
+    cd ${snapshot_dir}
+
+    mkdir dkms
+
+    if [ -f /etc/dkms/framework.conf ] && [ -r /etc/dkms/framework.conf ]
+    then
+        dkms_tree=$(. /etc/dkms/framework.conf ; echo ${dkms_tree})
+    fi
+    if [ -z "${dkms_tree}" ]
+    then
+        dkms_tree=/var/lib/dkms
+    fi
+    dkms status --verbose >dkms/dkms-status.txt 2>dkms/dkms-status-errors.txt
+    (cd "${dkms_tree}" ; tar -cf ${snapshot_dir}/dkms/dkms-logs.tar --files-from=/dev/null $(find . -type d -name log))
+
+    dkms_dirs=$(cat dkms/dkms-status.txt | sed -e 's:,.*$::g' -e 's:/:-:g')
+    if [ -n "${dkms_dirs}" ]
+    then
+        if [ -f /etc/dkms/framework.conf ] && [ -r /etc/dkms/framework.conf ]
+        then
+            dkms_source_tree=$(. /etc/dkms/framework.conf ; echo ${source_tree})
+        fi
+        if [ -z "${dkms_source_tree}" ]
+        then
+            dkms_source_tree=/usr/src
+        fi
+        (cd "${dkms_source_tree}" ; tar -cf ${snapshot_dir}/dkms/dkms-confs.tar --files-from=/dev/null $(find ${dkms_dirs} -type f -name "*.conf"))
+    fi
+
+    for dev in ${devlist[devices]}
+    do
+        mkdir -p ${dev}/device ${dev}/counters ${dev}/retry_handler
+        ethtool -m ${dev} >${dev}/ethtool_m 2>&1
+        ethtool -i ${dev} >${dev}/ethtool_i 2>&1
+        ethtool -k ${dev} >${dev}/ethtool_k 2>&1
+        ip addr show dev ${dev} >${dev}/ip_addr
+
+        for ent in ${net_dev_entries}
+        do
+            sysfs_entry=/sys/class/net/${dev}/${ent}
+            if [ ! -f ${sysfs_entry} ]
+            then
+                msg_warn 'device=%s entry "%s" not available\n' ${dev} ${ent} >${dev}/${ent}
+            else
+                cp ${sysfs_entry} ${dev}/${ent}
+            fi
+        done
+
+        firmware_version ${dev} >${dev}/firmware_version
+        firmware_config ${dev} >${dev}/firmware_config
+        lspci_vvv ${dev} >${dev}/lspci_vvv
+        counters_statistics ${dev} >${dev}/counters/statistics
+        counters_debug ${dev} >${dev}/counters/debug
+
+        dev_sriov ${dev} >${dev}/device/sriov
+
+        case ${devlist[${dev},DRIVER]} in
+            mlx5_core)
+                mlxlink ${dev} >${dev}/mlxlink_d
+                mlxuptime ${dev} >${dev}/mlxuptime_d
+                counters_ib_stats ${dev} >${dev}/counters/ib_stats
+                counters_ib_counters ${dev} >${dev}/counters/ib_counters
+                counters_ib_hw_counters ${dev} >${dev}/counters/ib_hw_counters
+                ;;
+            cxi_ss1)
+                dev_properties ${dev} >${dev}/device/properties
+                mkdir -p ${dev}/retry_handler
+                counters_cxi_telemetry ${dev} >${dev}/counters/telemetry.txt
+                for ent in /run/cxi/${devlist[${dev},sub_dev]}/*
+                do
+                    cp ${ent} ${dev}/retry_handler/${ent##*/}
+                done
+                journalctl --utc --unit=cxi_rh@${devlist[${dev},sub_dev]} >${dev}/retry_handler/log.txt
+                ;;
+            *)
+                :
+                ;;
+        esac
+    done
+
+    dmesg       >dmesg.txt
+    rpm -qa     >rpm_manifest
+    env         >env.txt
+
+    mkdir -p rpminfo
+    for ent in ${rpm_list_all}
+    do
+        rpm -qli ${ent} >rpminfo/${ent}.rpminfo
+    done
+
+    mst_status >mst_status
+    mlx_cables >mlx_cables
+
+    touch modinfo_data modinfo_parameters
+    for ent in $(lsmod | egrep '^mlx|^ib|^cxi' | awk '{print $1}')
+    do
+        #
+        # get the module information
+        #
+        modinfo ${ent} >>modinfo_data
+        #
+        # get the module parameters
+        #
+        if [ -d /sys/module/${ent}/parameters ]
+        then
+            grep -E -e . -H -r /sys/module/${ent}/parameters \
+                    | sed -e 's,^/sys/module/\([^/]*\)/parameters/\([^/:]*\):\(.*\)$,\1:\2: \3,g' \
+                    >>modinfo_parameters
+        fi
+    done
+    grep filename modinfo_data | awk '{print $2;}' >modpath
+
+    if [ -f /var/log/slingshot-lldp.log ]
+    then
+        cp /var/log/slingshot-lldp.log .
+    else
+        touch slingshot-lldp-log-DNE
+    fi
+
+    if [ -n "${scriptdebug}" ]
+    then
+        find ${snapshot_dir}
+    fi
+
+    tar -cvzf ${snapshot_dir}.tgz --transform='s:tmp/::g' ${snapshot_dir}
+
+    #rm -rf ${snapshot_dir}
+
+    msg 'Snapshot created at "%s.tgz"\nPlease copy/attach the snapshot as appropriate.\n'  "${snapshot_dir}"
+
+    return 0
+}
+
+########################################################################
+
+while [ ${#} -ne 0 ]
+do
+    case "${1}" in
+        -d | --debug )
+            DEBUG=1
+            VERBOSE=1
+            ;;
+        -h | --help )
+            HELP=1
+            ;;
+        -v | --verbose )
+            VERBOSE=1
+            ;;
+        -i | --iface )
+            devlist[devices]+="${2} "
+	    shift
+            ;;
+        -*)
+            slingshot_utils_usage
+            exit 255
+            ;;
+        *  )
+            break
+            ;;
+    esac
+    shift
+done
+
+if [ ${HELP} -ne 0 ]
+then
+    slingshot_utils_usage
+    exit 0
+fi
+
+if [ ${#} -eq 0 ]
+then
+    slingshot_utils_usage
+    exit 255
+fi
+
+slingshot_utils_initialize
+subcmd="${1}"
+shift
+msg_debug 'subcmd="%s" args="%s"\n' "${subcmd}" "${*}"
+if [ ${devlist[ss10_count]} -eq 0 ] && [ ${devlist[ss11_count]} -eq 0 ]
+then
+    if [ "${subcmd}" == __devhook ]
+    then
+        #
+        # Since this invocation is development hook to run/test individual
+        # shell routimnes, just warn no interfaces were found.
+        #
+        msg_warn 'No Mellanox or Cassini interfaces detected.\n'
+    else
+        msg_diag 'No Mellanox or Cassini interfaces detected.  Exiting.\n'
+        exit 1
+    fi
+fi
+case "${subcmd}" in
+    devices)
+        slingshot_devices "${@}"
+        ;;
+    diag)
+        slingshot_diag "${@}"
+        ;;
+    snapshot)
+        slingshot_snapshot "${@}"
+        ;;
+    __devhook  )
+        "${@}"
+        ;;
+    *)
+        slingshot_utils_usage
+        exit 255
+        ;;
+esac
+exit ${?}
+#NOTREACHED
