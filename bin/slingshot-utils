@@ -38,43 +38,45 @@ rpm_list_common="\
 "
 
 rpm_list_common_optional="\
- libfabric-devel\
 "
+# libfabric-devel\
 
 rpm_list_ss10="\
- mlnx-ofa_kernel\
- rdma-core\
 "
+#mlnx-ofa_kernel\
+#rdma-core\
 
 rpm_list_ss10_optional="\
 "
 
 rpm_list_ss11="\
- cray-cxi-driver-udev\
- cray-diags-fabric\
- cray-hms-firmware\
- cray-libcxi\
- cray-libcxi-retry-handler\
- cray-slingshot-base-link-kmp-cray_shasta_c\
- slingshot-firmware-cassini\
- slingshot-firmware-management\
- slingshot-network-config\
 "
+# cray-cxi-driver-udev\
+# cray-diags-fabric\
+# cray-hms-firmware\
+# cray-libcxi\
+# cray-libcxi-retry-handler\
+# cray-slingshot-base-link-kmp-cray_shasta_c\
+# slingshot-firmware-cassini\
+# slingshot-firmware-management\
+# slingshot-network-config\
+
 
 rpm_list_ss11_optional="\
- cray-cassini-headers-user\
- cray-cassini-libcsrmap\
- cray-cxi-driver-devel\
- cray-cxi-driver-kmp-cray_shasta_c\
- cray-kfabric-devel\
- cray-kfabric-kmp-cray_shasta_c\
- cray-kfabric-udev\
- cray-libcxi-devel\
- cray-libcxi-dracut\
- cray-libcxi-utils\
- cray-slingshot-base-link-devel\
- slingshot-utils\
 "
+# cray-cassini-headers-user\
+# cray-cassini-libcsrmap\
+# cray-cxi-driver-devel\
+# cray-cxi-driver-kmp-cray_shasta_c\
+# cray-kfabric-devel\
+# cray-kfabric-kmp-cray_shasta_c\
+# cray-kfabric-udev\
+# cray-libcxi-devel\
+# cray-libcxi-dracut\
+# cray-libcxi-utils\
+# cray-slingshot-base-link-devel\
+# slingshot-utils\
+
 
 rpm_list_all="\
  ${rpm_list_common}\
