@@ -35,6 +35,7 @@ devlist[ss11_count]=0
 
 rpm_list_common="\
  libfabric\
+ kdreg2\
 "
 
 rpm_list_common_optional="\
