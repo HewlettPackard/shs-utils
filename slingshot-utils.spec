@@ -32,6 +32,7 @@ rm -rf %{buildroot}
 install -D -m 0755 bin/slingshot-utils %{buildroot}/%{_prefix}/bin/slingshot-utils
 install -D -m 0755 bin/slingshot-snapshot.sh %{buildroot}/%{_prefix}/bin/slingshot-snapshot
 install -D -m 0755 bin/slingshot-diag.sh %{buildroot}/%{_prefix}/bin/slingshot-diag
+install -D -m 7555 bin/slingshot-show-cxi-iommu-group %{buildroot}/%{_prefix}/bin/slingshot-show-cxi-iommu-group
 
 %clean
 rm -rf %{buildroot}
@@ -48,6 +49,7 @@ SH_BINDIR_DEFAULT=${SH_BINDIR/%{_build_id}/default}
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-utils /usr/bin/slingshot-utils
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-snapshot /usr/bin/slingshot-snapshot
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-diag /usr/bin/slingshot-diag
+ln -sf ${SH_BINDIR_DEFAULT}/slingshot-show-cxi-iommu-group /usr/bin/slingshot-show-cxi-iommu-group
 
 %postun
 rm -rf %{_prefix}
@@ -65,6 +67,7 @@ if [ "$(ls -l ${SH_PREFIX_DEFAULT} 2>/dev/null | sed 's#.*/##')" == "%{_build_id
         rm -f /usr/bin/slingshot-utils
         rm -f /usr/bin/slingshot-snapshot
         rm -f /usr/bin/slingshot-diag
+        rm -f /usr/bin/slingshot-show-cxi-iommu-group
         # delete the directories (if empty)
         rmdir ${SH_PREFIX_BASE} 2>/dev/null || true
         rmdir ${SH_PREFIX_BASE%/%{name}} 2>/dev/null || true
@@ -80,6 +83,7 @@ fi
 %{_prefix}/bin/slingshot-utils
 %{_prefix}/bin/slingshot-snapshot
 %{_prefix}/bin/slingshot-diag
+%{_prefix}/bin/slingshot-show-cxi-iommu-group
 %doc COPYING
 
 %changelog

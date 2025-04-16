@@ -1,0 +1,103 @@
+#!/bin/sh
+# Copyright 2025 Hewlett Packard Enterprise Development LP. All rights reserved.
+
+scriptname="${0##*/}"
+
+C1_VENDOR_ID=0x17db
+C1_DEVICE_ID=0x0501
+C2_VENDOR_ID=0x1590
+C2_DEVICE_ID=0x0371
+
+is_slingshot_device()
+{
+    local vendor=${1}
+    local device=${2}
+    local retval=0
+
+    if [ ${#} -ne 2 ] || [ -z "${vendor}" ] || [ -z "${device}" ]; then
+        printf '%s: internal error in is_slingshot_device\n' "${scriptname}"
+        exit 1
+    fi
+
+    case ${vendor}:${device} in
+        # Only Casssini 1 and 2 are currently supported
+        ${C1_VENDOR_ID}:${C1_DEVICE_ID} | ${C2_VENDOR_ID}:${C2_DEVICE_ID})
+            retval=0
+            ;;
+        *)
+            retval=1
+            ;;
+    esac
+
+    return ${retval}
+}
+
+slingshot_iommu_groups()
+{
+    local g=''
+    local d=''
+    local vendor=''
+    local device=''
+
+    for g in $(find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 -type d | sort -V); do
+        for d in ${g}/devices/*; do
+            vendor=$(cat ${d}/vendor 2>&1)
+            if [ ${?} -ne 0 ]; then
+                continue
+            fi
+
+            device=$(cat ${d}/device 2>&1)
+            if [ ${?} -ne 0 ]; then
+                continue
+            fi
+
+            is_slingshot_device ${vendor} ${device}
+            retvaltmp=${?}
+            if [ ${retvaltmp} -eq 0 ]; then
+                printf '%s ' ${g}
+                break
+            fi
+        done
+    done
+    return 0
+}
+
+usage()
+{
+    local _usage="
+USAGE: ${scriptname} [--help]
+
+Show C IOMMU groups.
+
+--help
+
+        Display this message
+"
+
+  printf '%s\n' "${_usage}"
+  exit 255
+}
+
+show()
+{
+    local g=''
+    local d=''
+    local type=''
+
+    for g in $(slingshot_iommu_groups); do
+        type=$(cat ${g}/type)
+        printf 'IOMMU Group %s type=%s\n' "${g}" "${type}"
+
+        for d in $g/devices/*; do
+            lspci -nns "${d##*/}"
+        done
+    done
+}
+
+if [ ${#} -gt 0 ]; then
+    usage
+fi
+
+show
+
+exit 0
