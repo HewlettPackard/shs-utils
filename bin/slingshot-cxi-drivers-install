@@ -1,0 +1,230 @@
+#!/bin/sh
+# Copyright 2025 Hewlett Packard Enterprise Development LP. All rights reserved.
+
+scriptname="${0##*/}"
+
+C1_VENDOR_ID=0x17db
+C1_DEVICE_ID=0x0501
+C2_VENDOR_ID=0x1590
+C2_DEVICE_ID=0x0371
+
+is_slingshot_device()
+{
+    local vendor=${1}
+    local device=${2}
+    local retval=0
+
+    if [ ${#} -ne 2 ] || [ -z "${vendor}" ] || [ -z "${device}" ]; then
+        printf '%s: internal error in is_slingshot_device\n' "${scriptname}"
+        exit 1
+    fi
+
+    case ${vendor}:${device} in
+        # Only Casssini 1 and 2 are currently supported
+        ${C1_VENDOR_ID}:${C1_DEVICE_ID} | ${C2_VENDOR_ID}:${C2_DEVICE_ID})
+            retval=0
+            ;;
+        *)
+            retval=1
+            ;;
+    esac
+
+    return ${retval}
+}
+
+slingshot_iommu_groups()
+{
+    local g=''
+    local d=''
+    local vendor=''
+    local device=''
+
+    for g in $(find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 -type d | sort -V); do
+        for d in ${g}/devices/*; do
+            vendor=$(cat ${d}/vendor 2>&1)
+            if [ ${?} -ne 0 ]; then
+                continue
+            fi
+
+            device=$(cat ${d}/device 2>&1)
+            if [ ${?} -ne 0 ]; then
+                continue
+            fi
+
+            is_slingshot_device ${vendor} ${device}
+            retvaltmp=${?}
+            if [ ${retvaltmp} -eq 0 ]; then
+                printf '%s ' ${g}
+                break
+            fi
+        done
+    done
+    return 0
+}
+
+usage()
+{
+    local _usage="
+USAGE: ${scriptname} [--help] [ --iommu-group TYPE ]
+
+Script used to load the Slingshot NIC (CXI) drivers and apply configuration. This
+script can be run as a part of the modprobe.conf cxi-ss1 install step.
+
+This script expects to manage loading of all Slingshot NIC drivers. This includes
+cxi-ss1, cxi-user, cxi-eth, and kfi_cxi. If other methods, such as udev, are used
+to load drivers, the other methods will conflict with this script.
+
+--help
+
+        Display this message
+
+--iommu-group TYPE
+        Configure the corresponding CXI device IOMMU groups before loading
+        device driver. The IOMMU group can only be reconfigured if the number
+        of devices in IOMMU group is 1 (i.e., a single CXI device).
+
+        IOMMU group type to be configured. Options are:
+
+            DMA         All the DMA transactions from the device are translated.
+
+            DMA-FQ      Same as above, but with batched/lazy invalidation.
+
+            identity    IOMMU does not translate device DMA.
+
+            auto        Use the type the device was booted with.
+"
+
+  printf '%s\n' "${_usage}"
+  exit 255
+}
+
+iommu_group_modify()
+{
+    local g=''
+    local before=''
+    local after=''
+    local retvaltmp=0
+    local p=''
+    local igtype=''
+    local count=0
+
+    if [ ${#} -ne 1 ]; then
+        printf '%s: internal error in iommu_group_modify\n' "${scriptname}"
+        exit 1
+    fi
+
+    case "${1}" in
+        DMA | DMA-FQ | identity | auto)
+            igtype=${1}
+            ;;
+        *)
+            usage
+            ;;
+    esac
+
+    # Need to load cxi-ss1 driver for IOMMU groups to appear.
+    /sbin/modprobe --ignore-install cxi-ss1
+    retvaltmp=${?}
+    if [ ${retvaltmp} -ne 0 ]; then
+        printf "%s: ERROR: failed to load cxi-ss1\n" "${scriptname}"
+        exit 1
+    fi
+
+    # TODO: Switch over to unbind Slingshot NICs from cxi-ss1 instead
+    # of unloading the driver to modify IOMMU groups.
+    rmmod cxi-ss1
+    if [ ${retvaltmp} -ne 0 ]; then
+        printf "%s: ERROR: failed to unload cxi-ss1\n" "${scriptname}"
+        exit 1
+    fi
+
+    # Need to verify that each Slingshot IOMMU group contains only a single
+    # device. If not, additional configuration, such as unloading additional
+    # non-Slingshot device drivers, may be required. Supporting this is
+    # outside scope fo this script.
+    for g in $(slingshot_iommu_groups); do
+        count=0
+        for d in ${g}/devices/*; do
+            count=$((count+1))
+        done
+
+        if [ ${count} -ne 1 ]; then
+            printf '%s: ERROR: %g contains multiple devices\n' "${scriptname}" "${g}"
+            exit 1
+        fi
+    done
+
+    for g in $(slingshot_iommu_groups); do
+        before=$(cat ${g}/type)
+        if [ ${before} = ${igtype} ]; then
+            printf "%s: INFO: %s/type is already %s\n" "${scriptname}" "${g}" "${igtype}"
+            continue
+        fi
+
+        printf "%s" ${igtype} > ${g}/type
+        retvaltmp=${?}
+        if [ ${retvaltmp} -ne 0 ]; then
+            printf "%s: ERROR: failed to change %s/type from %s to %s\n" "${scriptname}" "${g}" "${before}" "${igtype}"
+            exit 1
+        fi
+
+        # If auto is selected, no need for before after comparison since type
+        # will change to what device was booted with.
+        if [ ${igtype} = "auto" ]; then
+            continue
+        fi
+
+        after=$(cat ${g}/type)
+        if [ ${after} != ${igtype} ]; then
+                printf "%s: ERROR: %s/type is %s expecting %s\n" "${scriptname}" "${g}" "${after}" "${igtype}"
+                exit 1
+        else
+                printf '%s: INFO: %s/type changed from %s to %s\n' "${scriptname}" "${g}" "${before}" "${after}"
+        fi
+    done
+}
+
+while [ ${#} -gt 0 ]; do
+    arg="${1}"
+    shift
+    case "${arg}" in
+        --iommu-group)
+            iommu_group_modify "${1}"
+            shift
+            ;;
+        --help | *)
+            usage
+            ;;
+    esac
+done
+
+/sbin/modprobe --ignore-install cxi-ss1
+retvaltmp=${?}
+if [ ${retvaltmp} -ne 0 ]; then
+    printf "%s: ERROR: failed to load cxi-ss1\n" "${scriptname}"
+    exit 1
+fi
+
+# Load the rest of the Slingshot drivers
+/sbin/modprobe -a cxi_user cxi_eth
+retvaltmp=${?}
+if [ ${retvaltmp} -ne 0 ]; then
+    printf "%s: ERROR: failed to load cxi_user cxi_eth failed\n" "${scriptname}"
+    exit 1
+fi
+
+# kfi_cxi may not be installed. Optionally, load it.
+/sbin/modinfo kfi_cxi 2>/dev/null
+retvaltmp=${?}
+if [ ${retvaltmp} -eq 0 ]; then
+
+    /sbin/modprobe kfi_cxi
+    retvaltmp=${?}
+    if [ ${retvaltmp} -ne 0 ]; then
+        printf "%s: ERROR: failed to load kfi_cxi\n" "${scriptname}"
+        exit 1
+    fi
+
+fi
+
+exit 0

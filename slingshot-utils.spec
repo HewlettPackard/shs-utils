@@ -33,6 +33,7 @@ install -D -m 0755 bin/slingshot-utils %{buildroot}/%{_prefix}/bin/slingshot-uti
 install -D -m 0755 bin/slingshot-snapshot.sh %{buildroot}/%{_prefix}/bin/slingshot-snapshot
 install -D -m 0755 bin/slingshot-diag.sh %{buildroot}/%{_prefix}/bin/slingshot-diag
 install -D -m 7555 bin/slingshot-show-cxi-iommu-group %{buildroot}/%{_prefix}/bin/slingshot-show-cxi-iommu-group
+install -D -m 7555 bin/slingshot-cxi-drivers-install %{buildroot}/%{_prefix}/bin/slingshot-cxi-drivers-install
 
 %clean
 rm -rf %{buildroot}
@@ -50,6 +51,7 @@ ln -sf ${SH_BINDIR_DEFAULT}/slingshot-utils /usr/bin/slingshot-utils
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-snapshot /usr/bin/slingshot-snapshot
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-diag /usr/bin/slingshot-diag
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-show-cxi-iommu-group /usr/bin/slingshot-show-cxi-iommu-group
+ln -sf ${SH_BINDIR_DEFAULT}/slingshot-cxi-drivers-install /usr/bin/slingshot-cxi-drivers-install
 
 %postun
 rm -rf %{_prefix}
@@ -68,6 +70,7 @@ if [ "$(ls -l ${SH_PREFIX_DEFAULT} 2>/dev/null | sed 's#.*/##')" == "%{_build_id
         rm -f /usr/bin/slingshot-snapshot
         rm -f /usr/bin/slingshot-diag
         rm -f /usr/bin/slingshot-show-cxi-iommu-group
+        rm -f /usr/bin/slingshot-cxi-drivers-install
         # delete the directories (if empty)
         rmdir ${SH_PREFIX_BASE} 2>/dev/null || true
         rmdir ${SH_PREFIX_BASE%/%{name}} 2>/dev/null || true
@@ -84,6 +87,7 @@ fi
 %{_prefix}/bin/slingshot-snapshot
 %{_prefix}/bin/slingshot-diag
 %{_prefix}/bin/slingshot-show-cxi-iommu-group
+%{_prefix}/bin/slingshot-cxi-drivers-install
 %doc COPYING
 
 %changelog
