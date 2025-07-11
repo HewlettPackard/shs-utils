@@ -8,6 +8,9 @@ C1_DEVICE_ID=0x0501
 C2_VENDOR_ID=0x1590
 C2_DEVICE_ID=0x0371
 
+LOCKFILE="/var/run/${scriptname}.lock"
+TMP_MODPROBE_CFG="/etc/modprobe.d/01-${scriptname}-tmp.conf"
+
 is_slingshot_device()
 {
     local vendor=${1}
@@ -70,10 +73,6 @@ USAGE: ${scriptname} [--help] [ --iommu-group TYPE ]
 Script used to load the Slingshot NIC (CXI) drivers and apply configuration. This
 script can be run as a part of the modprobe.conf cxi-ss1 install step.
 
-This script expects to manage loading of all Slingshot NIC drivers. This includes
-cxi-ss1, cxi-user, cxi-eth, and kfi_cxi. If other methods, such as udev, are used
-to load drivers, the other methods will conflict with this script.
-
 --help
 
         Display this message
@@ -122,6 +121,22 @@ iommu_group_modify()
             ;;
     esac
 
+    # Temporarily blacklist the other Slingshot modules so that udev does not
+    # load them while we are setting up the IOMMU group.
+    BLACKLIST_MODULES=(
+        cxi-user
+        cxi-eth
+        kfi-cxi
+    )
+    if [ -f "${TMP_MODPROBE_CFG}" ]; then
+        printf "%s: ERROR: %s already exists, please remove it before running this script\n" "${scriptname}" "${TMP_MODPROBE_CFG}"
+        exit 1
+    fi
+
+    for module in "${BLACKLIST_MODULES[@]}"; do
+        echo "blacklist ${module}" >> "${TMP_MODPROBE_CFG}"
+    done
+
     # Need to load cxi-ss1 driver for IOMMU groups to appear.
     /sbin/modprobe --ignore-install cxi-ss1
     retvaltmp=${?}
@@ -137,6 +152,7 @@ iommu_group_modify()
         printf "%s: ERROR: failed to unload cxi-ss1\n" "${scriptname}"
         exit 1
     fi
+    rm -f "${TMP_MODPROBE_CFG}"
 
     # Need to verify that each Slingshot IOMMU group contains only a single
     # device. If not, additional configuration, such as unloading additional
@@ -184,6 +200,24 @@ iommu_group_modify()
     done
 }
 
+clean_exit() {
+    rm -f "${LOCKFILE}"
+    rm -f "${TMP_MODPROBE_CFG}"
+}
+
+# If multiple Slingshot NICs are present, this script may end up getting
+# excuted in parallel. Serialise execution so that the first instance performs
+# the IOMMU group setup, and subsequent instances see correctly configured IOMMU
+# groups.
+lockfile -10 -r3 "${LOCKFILE}"
+retvaltmp=${?}
+if [ ${retvaltmp} -ne 0 ]; then
+    printf "%s: ERROR: failed to obtain lock on %s\n" "${scriptname}" "${LOCKFILE}"
+    exit 1
+fi
+
+trap clean_exit EXIT INT TERM
+
 while [ ${#} -gt 0 ]; do
     arg="${1}"
     shift
@@ -205,26 +239,8 @@ if [ ${retvaltmp} -ne 0 ]; then
     exit 1
 fi
 
-# Load the rest of the Slingshot drivers
-/sbin/modprobe -a cxi_user cxi_eth
-retvaltmp=${?}
-if [ ${retvaltmp} -ne 0 ]; then
-    printf "%s: ERROR: failed to load cxi_user cxi_eth failed\n" "${scriptname}"
-    exit 1
-fi
+# Remaining modules will be loaded by udev rules.
 
-# kfi_cxi may not be installed. Optionally, load it.
-/sbin/modinfo kfi_cxi 2>/dev/null
-retvaltmp=${?}
-if [ ${retvaltmp} -eq 0 ]; then
-
-    /sbin/modprobe kfi_cxi
-    retvaltmp=${?}
-    if [ ${retvaltmp} -ne 0 ]; then
-        printf "%s: ERROR: failed to load kfi_cxi\n" "${scriptname}"
-        exit 1
-    fi
-
-fi
+rm -f "${LOCKFILE}"
 
 exit 0
