@@ -9,6 +9,7 @@ C2_VENDOR_ID=0x1590
 C2_DEVICE_ID=0x0371
 
 LOCKFILE="/var/run/${scriptname}.lock"
+LOCKFD=99
 TMP_MODPROBE_CFG="/etc/modprobe.d/01-${scriptname}-tmp.conf"
 
 is_slingshot_device()
@@ -201,7 +202,6 @@ iommu_group_modify()
 }
 
 clean_exit() {
-    rm -f "${LOCKFILE}"
     rm -f "${TMP_MODPROBE_CFG}"
 }
 
@@ -209,7 +209,13 @@ clean_exit() {
 # excuted in parallel. Serialise execution so that the first instance performs
 # the IOMMU group setup, and subsequent instances see correctly configured IOMMU
 # groups.
-lockfile -10 -r3 "${LOCKFILE}"
+eval "exec ${LOCKFD}<>\"${LOCKFILE}\""
+retvaltmp=${?}
+if [ ${retvaltmp} -ne 0 ]; then
+    printf "%s: ERROR: failed to open lock file %s\n" "${scriptname}" "${LOCKFILE}"
+    exit 1
+fi
+flock -x -w 30 ${LOCKFD}
 retvaltmp=${?}
 if [ ${retvaltmp} -ne 0 ]; then
     printf "%s: ERROR: failed to obtain lock on %s\n" "${scriptname}" "${LOCKFILE}"
@@ -240,7 +246,5 @@ if [ ${retvaltmp} -ne 0 ]; then
 fi
 
 # Remaining modules will be loaded by udev rules.
-
-rm -f "${LOCKFILE}"
 
 exit 0
