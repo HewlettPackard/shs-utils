@@ -5,7 +5,7 @@
 %define _prefix %{component_prefix}/%{_build_id}
 
 Name: %{product}-%{component}
-Version: 2.1.0
+Version: 2.1.1
 Release: %(echo ${BUILD_METADATA})
 Group: System Environment/Libraries
 License: BSD
@@ -21,6 +21,8 @@ Distribution: Slingshot
 %description
 Slingshot Network config
 
+Requires: numactl
+
 %prep
 %setup -q -n %{name}-%{version}
 
@@ -31,6 +33,7 @@ rm -rf %{buildroot}
 
 install -D -m 0755 bin/slingshot-utils %{buildroot}/%{_prefix}/bin/slingshot-utils
 install -D -m 0755 bin/slingshot-snapshot.sh %{buildroot}/%{_prefix}/bin/slingshot-snapshot
+install -D -m 0755 bin/slingshot-eth-tuning.sh %{buildroot}/%{_prefix}/bin/slingshot-eth-tuning
 install -D -m 0755 bin/slingshot-diag.sh %{buildroot}/%{_prefix}/bin/slingshot-diag
 install -D -m 7555 bin/slingshot-show-cxi-iommu-group %{buildroot}/%{_prefix}/bin/slingshot-show-cxi-iommu-group
 install -D -m 7555 bin/slingshot-cxi-drivers-install %{buildroot}/%{_prefix}/bin/slingshot-cxi-drivers-install
@@ -49,6 +52,7 @@ SH_BINDIR=%{_bindir}
 SH_BINDIR_DEFAULT=${SH_BINDIR/%{_build_id}/default}
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-utils /usr/bin/slingshot-utils
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-snapshot /usr/bin/slingshot-snapshot
+ln -sf ${SH_BINDIR_DEFAULT}/slingshot-eth-tuning /usr/bin/slingshot-eth-tuning
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-diag /usr/bin/slingshot-diag
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-show-cxi-iommu-group /usr/bin/slingshot-show-cxi-iommu-group
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-cxi-drivers-install /usr/bin/slingshot-cxi-drivers-install
@@ -68,6 +72,7 @@ if [ "$(ls -l ${SH_PREFIX_DEFAULT} 2>/dev/null | sed 's#.*/##')" == "%{_build_id
         # This is the last instance of the package so we delete all the symlinks
         rm -f /usr/bin/slingshot-utils
         rm -f /usr/bin/slingshot-snapshot
+        rm -f /usr/bin/slingshot-eth-tuning
         rm -f /usr/bin/slingshot-diag
         rm -f /usr/bin/slingshot-show-cxi-iommu-group
         rm -f /usr/bin/slingshot-cxi-drivers-install
@@ -85,6 +90,7 @@ fi
 %defattr(-,root,root,-)
 %{_prefix}/bin/slingshot-utils
 %{_prefix}/bin/slingshot-snapshot
+%{_prefix}/bin/slingshot-eth-tuning
 %{_prefix}/bin/slingshot-diag
 %{_prefix}/bin/slingshot-show-cxi-iommu-group
 %{_prefix}/bin/slingshot-cxi-drivers-install

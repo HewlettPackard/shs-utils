@@ -1,7 +1,7 @@
-# eth-tuning
+# slingshot-eth-tuning
 Slingshot Host Software Ethernet Tuning
 
-This utility script (`eth_tuning.sh`) is designed to optimize network interface parameters for high-performance networking, particularly for HSN (High-Speed Network) interfaces. It provides a comprehensive set of tools to get, set, and recommend optimal network parameters for both system-wide TCP settings and device-specific configurations.
+This utility script (`slingshot-eth-tuning.sh`) is designed to optimize network interface parameters for high-performance networking, particularly for HSN (High-Speed Network) interfaces. It provides a comprehensive set of tools to get, set, and recommend optimal network parameters for both system-wide TCP settings and device-specific configurations.
 
 ## Purpose
 
@@ -74,23 +74,23 @@ The script provides three main modes of operation:
 
 1. **Get Mode**
    ```bash
-   ./eth_tuning_new.sh --get value [--device <network_device>]
-   ./eth_tuning_new.sh --get recommendation
+   slingshot-eth-tuning.sh --get value [--device <network_device>]
+   slingshot-eth-tuning.sh --get recommendation
    ```
    - Retrieves current network settings
    - Shows recommended values for optimal performance
 
 2. **Set Mode**
    ```bash
-   ./eth_tuning_new.sh --set value [--device <network_device>] [options]
-   ./eth_tuning_new.sh --set recommendation [--device <network_device>]
+   slingshot-eth-tuning.sh --set value [--device <network_device>] [options]
+   slingshot-eth-tuning.sh --set recommendation [--device <network_device>]
    ```
    - Applies specific network settings
    - Can set recommended values automatically
 
 3. **Dry Run Mode**
    ```bash
-   ./eth_tuning_new.sh --set value [options] --dry-run
+   slingshot-eth-tuning.sh --set value [options] --dry-run
    ```
    - Shows commands that would be executed
    - Useful for previewing changes
