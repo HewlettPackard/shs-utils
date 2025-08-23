@@ -494,7 +494,7 @@ check_for_routing_rules()
     if ${DIAG_RUN_SCRIPT}
     then
         msg_diag 'slingshot routing rules for ingress/egress rules on interfaces has not been run'
-        msg_diag 'Recommendation: run /usr/bin/slingshot-ifroute'
+        msg_diag 'Recommendation: run the command slingshot-ifroute'
     fi
 }
 
@@ -735,7 +735,7 @@ slingshot_diag()
 
     if [ ${WARN_COUNT} -gt 0 ] || [ ${ERROR_COUNT} -gt 0 ]
     then
-        msg_diag 'Recommendation: run /usr/sbin/slingshot-snapshot and provide tarball to support\n'
+        msg_diag 'Recommendation: run the command slingshot-snapshot and provide tarball to support\n'
     fi
 
     if [ ${WARN_COUNT} -gt 0 ]
