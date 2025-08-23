@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# © Copyright 2025 Hewlett Packard Enterprise Development LP
+# Copyright 2025 Hewlett Packard Enterprise Development LP. All rights reserved.
 #
 
 # Global variables
@@ -58,10 +58,11 @@ Available Set Options:
   --txqlen <value>           Set TX queue length
   --queue <value>            Set number of queues
   --bitmask                  Set XPS CPU bitmasks
-  --cores <num>              (Optional) Override number of cores for XPS (can only be used with --bitmask)
-                             Selects N cores from the NIC's local NUMA node, skipping the first (first is reserved for interrupts).
-                             Example: if NIC's local NUMA node 1 has CPUs 16-31 and --cores 4 is given, selects CPUs 17–20.
+  --cores <num>              (Optional) Override number of cores for XPS (only with --bitmask)
+                             Selects N cores from the NIC's NUMA node, skipping the first (reserved for interrupts).
+                             Example: if NUMA node 1 has CPUs 16-31 and --cores 4 is given, selects CPUs 17–20.
                              With 16 queues and --cores 19, 3 queues get 2 CPUs, others get 1 CPU each.
+  --smp_affinity             Set CPU affinity for IRQs
   --rmem_max <value>         Set maximum receive buffer
   --wmem_max <value>         Set maximum send buffer
   --tcp_rmem <min def max>   Set TCP receive buffer sizes
@@ -85,6 +86,8 @@ Examples:
     $scriptname --set value --device hsn0 --mtu 9000 --pause on --queue 16
     $scriptname --set recommendation
     $scriptname --set recommendation --device hsn0
+    $scriptname --set value --smp_affinity
+    $scriptname --set value --smp_affinity --device hsn0
 
   XPS/CPU Bitmask Examples:
     $scriptname --set value --bitmask
@@ -114,8 +117,10 @@ Examples:
     $scriptname --set value --mtu 9000 --dry-run
     $scriptname --set value --bitmask --cores 4 --dry-run
     $scriptname --set recommendation --dry-run
+    $scriptname --set value --smp_affinity --dry-run
     $scriptname --set value --device hsn0 --mtu 9000 --dry-run
     $scriptname --set value --device hsn0 --bitmask --cores 4 --dry-run
+    $scriptname --set value --smp_affinity --device hsn0 --dry-run
     $scriptname --set value --device hsn0 \\
       --mtu $RECOMMENDED_MTU \\
       --pause $RECOMMENDED_PAUSE \\
@@ -337,6 +342,419 @@ show_system_wide_settings() {
     done | sort -u
 }
 
+# Function to get CXI device name from Ethernet interface
+get_cxi_device() {
+    local eth_interface="$1"
+    local eth_path=$(readlink -f "/sys/class/net/${eth_interface}/device")
+    
+    for cxi_device in /sys/class/cxi/*; do
+        if [[ -d "$cxi_device" ]]; then
+            local cxi_dev_path=$(readlink -f "${cxi_device}/device")
+            if [[ "$eth_path" == "$cxi_dev_path" ]]; then
+                basename "$cxi_device"
+                return 0
+            fi
+        fi
+    done
+    
+    echo "Error: Invalid CXI Ethernet interface ${eth_interface}" >&2
+    return 1
+}
+
+# Function to get RX event queue IDs
+get_rx_eqs() {
+    local device="$1"
+    local path="/sys/kernel/debug/cxi_eth/${device}"
+    local rx_flag=0
+    local eqs=()
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^RX\ queue ]]; then
+            rx_flag=1
+        elif [[ "$line" =~ EQ=([0-9]+) ]]; then
+            if [[ "$rx_flag" -eq 1 ]]; then
+                eqs+=("${BASH_REMATCH[1]}")
+                rx_flag=0
+            fi
+        fi
+    done < "$path"
+
+    printf "%s\n" "${eqs[@]}"
+}
+
+# Function to get TX event queue IDs
+get_tx_eqs() {
+    local device="$1"
+    local path="/sys/kernel/debug/cxi_eth/${device}"
+    local tx_flag=0
+    local eqs=()
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^TX\ queue ]]; then
+            tx_flag=1
+        elif [[ "$line" =~ EQ=([0-9]+) ]]; then
+            if [[ "$tx_flag" -eq 1 ]]; then
+                eqs+=("${BASH_REMATCH[1]}")
+                tx_flag=0
+            fi
+        fi
+    done < "$path"
+
+    printf "%s\n" "${eqs[@]}"
+}
+
+# Function to convert event queue ID to IRQ number
+eq_to_irq() {
+    local cxi_device="$1"
+    local eq_id="$2"
+    local eq_path="/sys/kernel/debug/cxi/${cxi_device}/eq/${eq_id}"
+    local irq_name=""
+    
+    # Extract MSI vector name from event queue debugfs
+    while IFS= read -r line; do
+        if [[ "$line" =~ event[[:space:]]+MSI[[:space:]]+vector:[[:space:]]+([^[:space:]]+) ]]; then
+            irq_name="${BASH_REMATCH[1]}"
+            break
+        fi
+    done < "$eq_path"
+    
+    if [[ -z "$irq_name" ]]; then
+        echo "Error: Failed to find IRQ for ${cxi_device} EQ ${eq_id}" >&2
+        return 1
+    fi
+    
+    # Find IRQ number by matching MSI vector name in /proc/irq
+    for irq_dir in /proc/irq/*; do
+        if [[ -d "$irq_dir" ]] && [[ -e "${irq_dir}/${irq_name}" ]]; then
+            basename "$irq_dir"
+            return 0
+        fi
+    done
+    
+    echo "Error: Failed to find IRQ number for ${irq_name}" >&2
+    return 1
+}
+
+# Function to get RX IRQs from RX event queue IDs
+get_rx_irqs() {
+    local cxi_device="$1"
+    local rx_eqs=()
+    local rx_irqs=()
+    
+    # Read RX event queue IDs into array
+    while IFS= read -r eq; do
+        [[ -n "$eq" ]] && rx_eqs+=("$eq")
+    done < <(get_rx_eqs "$cxi_device")
+    
+    # Convert each EQ to IRQ
+    for eq in "${rx_eqs[@]}"; do
+        local irq=$(eq_to_irq "$cxi_device" "$eq")
+        if [[ $? -eq 0 ]]; then
+            rx_irqs+=("$irq")
+        else
+            echo "Warning: Failed to get IRQ for RX EQ ${eq}" >&2
+        fi
+    done
+    
+    printf "%s\n" "${rx_irqs[@]}"
+}
+
+# Function to get TX IRQs from TX event queue IDs
+get_tx_irqs() {
+    local cxi_device="$1"
+    local tx_eqs=()
+    local tx_irqs=()
+    
+    # Read TX event queue IDs into array
+    while IFS= read -r eq; do
+        [[ -n "$eq" ]] && tx_eqs+=("$eq")
+    done < <(get_tx_eqs "$cxi_device")
+    
+    # Convert each EQ to IRQ
+    for eq in "${tx_eqs[@]}"; do
+        local irq=$(eq_to_irq "$cxi_device" "$eq")
+        if [[ $? -eq 0 ]]; then
+            tx_irqs+=("$irq")
+        else
+            echo "Warning: Failed to get IRQ for TX EQ ${eq}" >&2
+        fi
+    done
+    
+    printf "%s\n" "${tx_irqs[@]}"
+}
+
+# Function to get IRQ SMP affinity list
+get_irq_smp_affinity_list() {
+    local irq="$1"
+    local affinity_file="/proc/irq/${irq}/smp_affinity_list"
+    
+    if [[ -f "$affinity_file" ]]; then
+        cat "$affinity_file"
+    else
+        echo "N/A"
+    fi
+}
+
+# Function to get CXI queue and IRQ information in table format
+get_cxi_queue_irq_info() {
+    local device="$1"
+    
+    # Get CXI device
+    local cxi_device=$(get_cxi_device_for_interface "$device")
+    if [[ $? -ne 0 ]]; then
+        # Not a CXI device, skip CXI information
+        return 0
+    fi
+    
+    # Get RX information
+    echo "--- RX Queues ---"
+    local rx_eqs=()
+    local rx_irqs=()
+    local rx_cpus=()
+    
+    # Collect RX event queue IDs
+    while IFS= read -r eq; do
+        [[ -n "$eq" ]] && rx_eqs+=("$eq")
+    done < <(get_rx_eqs "$cxi_device")
+    
+    # Get IRQs using helper function
+    local irq_info=$(collect_cxi_irqs "$cxi_device")
+    local rx_irqs_string=$(echo "$irq_info" | cut -d':' -f1)
+    local tx_irqs_string=$(echo "$irq_info" | cut -d':' -f2)
+    
+    # Convert to arrays
+    local rx_irqs=($rx_irqs_string)
+    local tx_irqs=($tx_irqs_string)
+    
+    # Collect RX IRQ CPU affinity
+    for irq in "${rx_irqs[@]}"; do
+        if [[ -n "$irq" ]]; then
+            local cpu=$(get_irq_smp_affinity_list "$irq")
+            rx_cpus+=("$cpu")
+        fi
+    done
+    
+    # Print RX table format
+    printf "%-18s" "CXI RX Event Q"
+    for ((i=0; i<${#rx_eqs[@]}; i++)); do
+        printf "%-10s" "${rx_eqs[$i]}"
+    done
+    echo ""
+    
+    printf "%-18s" "Linux RX IRQ ID"
+    for ((i=0; i<${#rx_irqs[@]}; i++)); do
+        printf "%-10s" "${rx_irqs[$i]}"
+    done
+    echo ""
+    
+    printf "%-18s" "Linux RX IRQ CPU"
+    for ((i=0; i<${#rx_cpus[@]}; i++)); do
+        printf "%-10s" "${rx_cpus[$i]}"
+    done
+    echo ""
+    echo ""
+    
+    # Get TX information
+    echo "--- TX Queues ---"
+    local tx_eqs=()
+    local tx_cpus=()
+    
+    # Collect TX event queue IDs
+    while IFS= read -r eq; do
+        [[ -n "$eq" ]] && tx_eqs+=("$eq")
+    done < <(get_tx_eqs "$cxi_device")
+    
+    # Collect TX IRQ CPU affinity
+    for irq in "${tx_irqs[@]}"; do
+        if [[ -n "$irq" ]]; then
+            local cpu=$(get_irq_smp_affinity_list "$irq")
+            tx_cpus+=("$cpu")
+        fi
+    done
+    
+    # Print TX table format
+    printf "%-18s" "CXI TX Event Q"
+    for ((i=0; i<${#tx_eqs[@]}; i++)); do
+        printf "%-10s" "${tx_eqs[$i]}"
+    done
+    echo ""
+    
+    printf "%-18s" "Linux TX IRQ ID"
+    for ((i=0; i<${#tx_irqs[@]}; i++)); do
+        printf "%-10s" "${tx_irqs[$i]}"
+    done
+    echo ""
+    
+    printf "%-18s" "Linux TX IRQ CPU"
+    for ((i=0; i<${#tx_cpus[@]}; i++)); do
+        printf "%-10s" "${tx_cpus[$i]}"
+    done
+    echo ""
+}
+
+# Helper function to get CXI device and validate it's a CXI Ethernet interface
+get_cxi_device_for_interface() {
+    local device="$1"
+    local cxi_device=""
+    
+    # Try to get CXI device name from Ethernet interface
+    cxi_device=$(get_cxi_device "$device" 2>/dev/null)
+    if [[ $? -ne 0 ]]; then
+        # Not a CXI device, return error
+        return 1
+    fi
+    
+    echo "$cxi_device"
+    return 0
+}
+
+# Helper function to get NUMA node information for a device
+get_numa_info() {
+    local device="$1"
+    local numa_node=$(cat "/sys/class/net/$device/device/numa_node")
+    local cpu_list=$(numactl --hardware | grep -A1 "node $numa_node cpus:" | head -n1 | cut -d":" -f2 | xargs | sed 's| |,|g')
+    local first_cpu=$(echo "$cpu_list" | cut -d',' -f1)
+    
+    echo "$numa_node:$cpu_list:$first_cpu"
+}
+
+# Helper function to collect RX and TX IRQs for a CXI device
+collect_cxi_irqs() {
+    local cxi_device="$1"
+    local rx_irqs=()
+    local tx_irqs=()
+    
+    # Get RX IRQs
+    while IFS= read -r irq; do
+        [[ -n "$irq" ]] && rx_irqs+=("$irq")
+    done < <(get_rx_irqs "$cxi_device")
+    
+    # Get TX IRQs
+    while IFS= read -r irq; do
+        [[ -n "$irq" ]] && tx_irqs+=("$irq")
+    done < <(get_tx_irqs "$cxi_device")
+    
+    # Return as space-separated strings
+    echo "${rx_irqs[*]}:${tx_irqs[*]}"
+}
+
+
+
+# Function to get CXI IRQ CPU affinity recommendations
+get_cxi_irq_cpu_recommendations() {
+    local device="$1"
+    
+    # Get CXI device
+    local cxi_device=$(get_cxi_device_for_interface "$device")
+    if [[ $? -ne 0 ]]; then
+        return 0
+    fi
+    
+    # Get NUMA information
+    local numa_info=$(get_numa_info "$device")
+    local cpu_list=$(echo "$numa_info" | cut -d':' -f2)
+    
+    # Get available CPUs as array
+    local cpus=()
+    IFS=',' read -ra cpus <<< "$cpu_list"
+    local total_cpus=${#cpus[@]}
+    local first_cpu="${cpus[0]}"
+    
+    # Get RX IRQs directly
+    local rx_irqs=()
+    while IFS= read -r irq; do
+        [[ -n "$irq" ]] && rx_irqs+=("$irq")
+    done < <(get_rx_irqs "$cxi_device")
+    
+    # Get TX IRQs directly
+    local tx_irqs=()
+    while IFS= read -r irq; do
+        [[ -n "$irq" ]] && tx_irqs+=("$irq")
+    done < <(get_tx_irqs "$cxi_device")
+    
+    echo ""
+    echo "CXI IRQ CPU Affinity Recommendations for $device:"
+    
+    # Process RX IRQs first, starting from first CPU
+    local cpu=$first_cpu
+    for irq in "${rx_irqs[@]}"; do
+        echo "echo $cpu > /proc/irq/$irq/smp_affinity_list  # RX IRQ"
+        cpu=$((cpu + 1))
+    done
+    
+    # Process TX IRQs, starting from the same first CPU
+    cpu=$first_cpu
+    for irq in "${tx_irqs[@]}"; do
+        echo "echo $cpu > /proc/irq/$irq/smp_affinity_list  # TX IRQ"
+        cpu=$((cpu + 1))
+    done
+}
+
+# Function to set CXI IRQ CPU affinity to NUMA local CPUs
+set_cxi_irqs_cpu() {
+    local device="$1"
+    
+    # Get CXI device
+    local cxi_device=$(get_cxi_device_for_interface "$device")
+    if [[ $? -ne 0 ]]; then
+        return 0
+    fi
+    
+    # Get NUMA information
+    local numa_info=$(get_numa_info "$device")
+    local cpu_list=$(echo "$numa_info" | cut -d':' -f2)
+    
+    # Get available CPUs as array
+    local cpus=()
+    IFS=',' read -ra cpus <<< "$cpu_list"
+    local total_cpus=${#cpus[@]}
+    local first_cpu="${cpus[0]}"
+    
+    # Get RX IRQs directly
+    local rx_irqs=()
+    while IFS= read -r irq; do
+        [[ -n "$irq" ]] && rx_irqs+=("$irq")
+    done < <(get_rx_irqs "$cxi_device")
+    
+    # Get TX IRQs directly
+    local tx_irqs=()
+    while IFS= read -r irq; do
+        [[ -n "$irq" ]] && tx_irqs+=("$irq")
+    done < <(get_tx_irqs "$cxi_device")
+    
+    # Set CPU affinity for RX IRQs first, starting from first CPU
+    local cpu=$first_cpu
+    for irq in "${rx_irqs[@]}"; do
+        if $DRY_RUN; then
+            echo "echo $cpu > /proc/irq/$irq/smp_affinity_list"
+        else
+            echo "$cpu" > "/proc/irq/$irq/smp_affinity_list"
+            if [[ $? -eq 0 ]]; then
+                echo "Successfully set RX IRQ $irq to CPU $cpu"
+            else
+                echo "Failed to set RX IRQ $irq to CPU $cpu"
+            fi
+        fi
+        cpu=$((cpu + 1))
+    done
+    
+    # Set CPU affinity for TX IRQs, starting from the same first CPU
+    cpu=$first_cpu
+    for irq in "${tx_irqs[@]}"; do
+        if $DRY_RUN; then
+            echo "echo $cpu > /proc/irq/$irq/smp_affinity_list"
+        else
+            echo "$cpu" > "/proc/irq/$irq/smp_affinity_list"
+            if [[ $? -eq 0 ]]; then
+                echo "Successfully set TX IRQ $irq to CPU $cpu"
+            else
+                echo "Failed to set TX IRQ $irq to CPU $cpu"
+            fi
+        fi
+        cpu=$((cpu + 1))
+    done
+}
+
 # Function to get network information
 get_network_info() {
     local device=$1
@@ -376,6 +794,10 @@ get_network_info() {
     local cpu_list=$(numactl --hardware | grep -A1 "node $numa_node cpus:" | head -n1 | cut -d":" -f2 | xargs | sed 's| |,|g')
     local tx_queues=$(ethtool -l "$device" 2>/dev/null | grep -A4 "Current hardware settings:" | grep "TX" | awk '{print $NF}')
     split_cpus "$cpu_list" "$tx_queues"
+    
+    # Add CXI event queue and IRQ information
+    echo -e "\n7. CXI Event Queue and IRQ Information:"
+    get_cxi_queue_irq_info "$device"
 }
 
 # Function to show IRQ balance status
@@ -549,6 +971,8 @@ get_recommended_settings() {
     echo "XPS:                see below  # CPUs from the device's NUMA node (skipping first core reserved"
     echo "                                 for interrupts) are distributed across TX queues. In recommended"
     echo "                                 settings, each queue gets exactly one CPU."
+    echo "CXI IRQ CPU Affinity: see below  # CXI event queue IRQs are assigned to NUMA-local CPUs"
+    echo "                                 starting from the first CPU in the device's NUMA node."
 
     # Get XPS recommendations using split_cpus
     ACTION="get"
@@ -575,6 +999,9 @@ get_recommended_settings() {
             local bitmask=$(cpulist_to_bitmask "${cpus_array[i]}")
             echo "/sys/class/net/$device_name/queues/tx-$queue_num/xps_cpus: $bitmask"
         done
+        
+        # Show CXI IRQ CPU affinity recommendations
+        get_cxi_irq_cpu_recommendations "$device_name"
     else
         # Process all HSN devices
         for nic in "$NET_PATH"/hsn*; do
@@ -594,6 +1021,9 @@ get_recommended_settings() {
                 local bitmask=$(cpulist_to_bitmask "${cpus_array[i]}")
                 echo "/sys/class/net/$device_name/queues/tx-$queue_num/xps_cpus: $bitmask"
             done
+            
+            # Show CXI IRQ CPU affinity recommendations
+            get_cxi_irq_cpu_recommendations "$device_name"
         done
     fi
 
@@ -612,7 +1042,7 @@ set_parameters() {
     local has_set_options=false
     for arg in "${args[@]}"; do
         case $arg in
-            --mtu|--pause|--rbuff|--txqlen|--queue|--rmem_max|--wmem_max|--tcp_rmem|--tcp_wmem|--irq|--bitmask)
+            --mtu|--pause|--rbuff|--txqlen|--queue|--rmem_max|--wmem_max|--tcp_rmem|--tcp_wmem|--irq|--bitmask|--smp_affinity)
                 has_set_options=true
                 break
                 ;;
@@ -699,6 +1129,10 @@ set_parameters() {
                     # XPS settings will be handled after other parameters
                     i=$((i+1))
                     ;;
+                --smp_affinity)
+                    # CXI IRQ CPU affinity will be handled after other parameters
+                    i=$((i+1))
+                    ;;
                 --mtu)
                     if [ $((i+1)) -lt ${#args[@]} ]; then
                         set_mtu "$interface" "${args[$((i+1))]}"
@@ -758,8 +1192,18 @@ set_parameters() {
                 break
             fi
         done
+        
+        # Handle CXI IRQ CPU affinity only if --smp_affinity was specified
+        for arg in "${args[@]}"; do
+            if [ "$arg" = "--smp_affinity" ]; then
+                set_cxi_irqs_cpu "$interface"
+                break
+            fi
+        done
     done
 }
+
+
 
 # Function to set recommended settings
 set_recommended_settings() {
@@ -839,6 +1283,12 @@ set_recommended_settings() {
             echo -e "\nWarning: Recommended queue count ($RECOMMENDED_QUEUES) is greater than available CPUs in NUMA node ($total_cpus)"
             echo "         This may impact performance. Consider reducing queue count or using a different NUMA node."
         fi
+        
+        # Set CXI IRQ CPU affinity
+        if ! $DRY_RUN; then
+            echo "Setting CXI IRQ CPU affinity for $device"
+        fi
+        set_cxi_irqs_cpu "$device"
     else
         if ! $DRY_RUN; then
             echo "Applying device specific settings to all HSN interfaces..."
@@ -894,6 +1344,12 @@ set_recommended_settings() {
                 echo -e "\nWarning: Recommended queue count ($RECOMMENDED_QUEUES) is greater than available CPUs in NUMA node ($total_cpus)"
                 echo "         This may impact performance. Consider reducing queue count or using a different NUMA node."
             fi
+            
+            # Set CXI IRQ CPU affinity
+            if ! $DRY_RUN; then
+                echo "Setting CXI IRQ CPU affinity for $interface"
+            fi
+            set_cxi_irqs_cpu "$interface"
         done
     fi
 
