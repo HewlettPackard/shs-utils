@@ -1,5 +1,9 @@
 #!/bin/bash 
 
+set -ex
+
 DIR=$(cd $(dirname $0) && pwd)
 
-bash -x $DIR/build.sh -n $@
+PRODUCT=slingshot-host-software \
+CE_CONFIG_FILE=utils.yaml \
+  bash -x $DIR/build.sh -n $@
