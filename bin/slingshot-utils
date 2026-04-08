@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Copyright 2021-2025 Hewlett Packard Enterprise Development LP. All rights reserved.
+# Copyright 2021-2026 Hewlett Packard Enterprise Development LP. All rights reserved.
 #
 
 ########################################################################
@@ -24,6 +24,7 @@ DEBUG=0
 VERBOSE=0
 WARN_COUNT=0
 ERROR_COUNT=0
+PKG_TYPE=''
 
 mlx_cmd_present=0
 cxi_cmd_present=0
@@ -33,24 +34,24 @@ declare -A devlist
 devlist[ss10_count]=0
 devlist[ss11_count]=0
 
-rpm_list_common="\
+pkg_list_common="\
  libfabric\
  kdreg2\
 "
 
-rpm_list_common_optional="\
+pkg_list_common_optional="\
 "
 # libfabric-devel\
 
-rpm_list_ss10="\
+pkg_list_ss10="\
 "
 #mlnx-ofa_kernel\
 #rdma-core\
 
-rpm_list_ss10_optional="\
+pkg_list_ss10_optional="\
 "
 
-rpm_list_ss11="\
+pkg_list_ss11="\
 "
 # cray-cxi-driver-udev\
 # cray-diags-fabric\
@@ -63,7 +64,7 @@ rpm_list_ss11="\
 # slingshot-network-config\
 
 
-rpm_list_ss11_optional="\
+pkg_list_ss11_optional="\
 "
 # cray-cassini-headers-user\
 # cray-cassini-libcsrmap\
@@ -79,13 +80,13 @@ rpm_list_ss11_optional="\
 # slingshot-utils\
 
 
-rpm_list_all="\
- ${rpm_list_common}\
- ${rpm_list_common_optional}\
- ${rpm_list_ss10}\
- ${rpm_list_ss10_optional}\
- ${rpm_list_ss11}\
- ${rpm_list_ss11_optional}
+pkg_list_all="\
+ ${pkg_list_common}\
+ ${pkg_list_common_optional}\
+ ${pkg_list_ss10}\
+ ${pkg_list_ss10_optional}\
+ ${pkg_list_ss11}\
+ ${pkg_list_ss11_optional}
 "
 
 ########################################################################
@@ -284,6 +285,23 @@ slingshot_utils_initialize()
     then
         devlist_show
     fi
+
+    #
+    # Detect the packaging system (RPM or DEB)
+    #
+    if command -v rpm >/dev/null 2>&1 && rpm -q rpm >/dev/null 2>&1
+    then
+        PKG_TYPE=rpm
+        msg_verbose 'RPM packaging system detected\n'
+    elif command -v dpkg-query >/dev/null 2>&1
+    then
+        PKG_TYPE=deb
+        msg_verbose 'DEB packaging system detected\n'
+    else
+        PKG_TYPE=unknown
+        msg_warn 'Could not detect a supported packaging system (rpm or dpkg)\n'
+    fi
+    msg_debug 'PKG_TYPE=%s\n' "${PKG_TYPE}"
 
     #
     # use mst as an indicator mellanox tools are installed
@@ -500,135 +518,183 @@ check_for_routing_rules()
 
 ########################################################################
 
-check_for_rpms()
+#
+# Returns 0 if the named package is installed, non-zero otherwise.
+# Works for both RPM and DEB systems.
+#
+pkg_is_installed()
+{
+    local pkg=${1:?}
+    case ${PKG_TYPE} in
+        rpm)
+            rpm -q "${pkg}" >/dev/null 2>&1
+            ;;
+        deb)
+            dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null \
+                | grep -q '^install ok installed$'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+#
+# Dump the full installed-package manifest to stdout.
+#
+pkg_list_installed()
+{
+    case ${PKG_TYPE} in
+        rpm) rpm -qa ;;
+        deb) dpkg -l ;;
+        *)   msg_warn 'Unknown packaging system; cannot list packages\n' ;;
+    esac
+}
+
+#
+# Print detailed info about a single installed package to stdout.
+#
+pkg_query_info()
+{
+    local pkg=${1:?}
+    case ${PKG_TYPE} in
+        rpm) rpm -qli "${pkg}" ;;
+        deb) dpkg -s "${pkg}" && dpkg -L "${pkg}" ;;
+        *)   msg_warn 'Unknown packaging system; cannot query package %s\n' "${pkg}" ;;
+    esac
+}
+
+########################################################################
+
+check_for_packages()
 {
     local r=''
     local retval=0
     local num_missing=0
-    local rpms_missing=''
+    local pkgs_missing=''
 
-    msg_debug 'check for rpms\n'
-    if [ -n "${rpm_list_common}" ]
+    msg_debug 'check for packages\n'
+    if [ -n "${pkg_list_common}" ]
     then
-        msg_verbose 'Checking for common Slingshot RPMs\n'
-        for r in ${rpm_list_common}
+        msg_verbose 'Checking for common Slingshot packages\n'
+        for r in ${pkg_list_common}
         do
-            rpm -q ${r} >/dev/null 2>&1
+            pkg_is_installed ${r}
             retval=${?}
-            msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
+            msg_debug 'Package check for "%s" returned: %d\n' ${r} ${retval}
             if [ ${retval} -ne 0 ]
             then
                 num_missing=$((${num_missing}+1))
-                rpms_missing+="${r} "
-                msg_warn 'Common Slingshot RPM not detected: %s\n' ${r}
+                pkgs_missing+="${r} "
+                msg_warn 'Common Slingshot package not detected: %s\n' ${r}
             fi
         done
     else
-        msg_debug 'common Slingshot RPM list is empty.\n'
+        msg_debug 'common Slingshot package list is empty.\n'
     fi
-    if [ -n "${rpm_list_common_optional}" ]
+    if [ -n "${pkg_list_common_optional}" ]
     then
-        msg_verbose 'Checking for optional common Slingshot RPMs\n'
-        for r in ${rpm_list_common_optional}
+        msg_verbose 'Checking for optional common Slingshot packages\n'
+        for r in ${pkg_list_common_optional}
         do
-            rpm -q ${r} >/dev/null 2>&1
+            pkg_is_installed ${r}
             retval=${?}
-            msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
+            msg_debug 'Package check for "%s" returned: %d\n' ${r} ${retval}
             if [ ${retval} -eq 0 ]
             then
-                msg_verbose 'Optional common Slingshot RPM was detected: %s\n' ${r}
+                msg_verbose 'Optional common Slingshot package was detected: %s\n' ${r}
             fi
         done
     else
-        msg_debug 'common Slingshot optional RPM list is empty.\n'
+        msg_debug 'common Slingshot optional package list is empty.\n'
     fi
 
     if [ ${devlist[ss10_count]} -eq 0 ]
     then
-        msg_verbose 'No Mellanox interfaces detected.  Skipping check for Mellanox RPMs\n'
+        msg_verbose 'No Mellanox interfaces detected.  Skipping check for Mellanox packages\n'
     else
-        if [ -n "${rpm_list_ss10}" ]
+        if [ -n "${pkg_list_ss10}" ]
         then
-            msg_verbose 'Checking for Mellanox RPMs\n'
-            for r in ${rpm_list_ss10}
+            msg_verbose 'Checking for Mellanox packages\n'
+            for r in ${pkg_list_ss10}
             do
-                rpm -q ${r} >/dev/null 2>&1
+                pkg_is_installed ${r}
                 retval=${?}
-                msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
+                msg_debug 'Package check for "%s" returned: %d\n' ${r} ${retval}
                 if [ ${retval} -ne 0 ]
                 then
                     num_missing=$((${num_missing}+1))
-                    rpms_missing+="${r} "
-                    msg_warn 'Mellanox RPM not detected: %s\n' ${r}
+                    pkgs_missing+="${r} "
+                    msg_warn 'Mellanox package not detected: %s\n' ${r}
                 fi
             done
         else
-            msg_debug 'Mellanox RPM list is empty.\n'
+            msg_debug 'Mellanox package list is empty.\n'
         fi
-        if [ -n "${rpm_list_ss10_optional}" ]
+        if [ -n "${pkg_list_ss10_optional}" ]
         then
-            msg_verbose 'Checking for optional Mellanox RPMs\n'
-            for r in ${rpm_list_ss10_optional}
+            msg_verbose 'Checking for optional Mellanox packages\n'
+            for r in ${pkg_list_ss10_optional}
             do
-                rpm -q ${r} >/dev/null 2>&1
+                pkg_is_installed ${r}
                 retval=${?}
-                msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
-                if [ ${retval} -ne 0 ]
+                msg_debug 'Package check for "%s" returned: %d\n' ${r} ${retval}
+                if [ ${retval} -eq 0 ]
                 then
-                    msg_verbose 'Optional Mellanox RPM was detected: %s\n' ${r}
+                    msg_verbose 'Optional Mellanox package was detected: %s\n' ${r}
                 fi
             done
         else
-            msg_debug 'Mellanox optional RPM list is empty.\n'
+            msg_debug 'Mellanox optional package list is empty.\n'
         fi
     fi
 
     if [ ${devlist[ss11_count]} -eq 0 ]
     then
-        msg_verbose 'No Cassini interfaces detected.  Skipping check for Cassini RPMs\n'
+        msg_verbose 'No Cassini interfaces detected.  Skipping check for Cassini packages\n'
     else
-        if [ -n "${rpm_list_ss11}" ]
+        if [ -n "${pkg_list_ss11}" ]
         then
-            msg_verbose 'Checking for Cassini RPMs\n'
-            for r in ${rpm_list_ss11}
+            msg_verbose 'Checking for Cassini packages\n'
+            for r in ${pkg_list_ss11}
             do
-                rpm -q ${r} >/dev/null 2>&1
+                pkg_is_installed ${r}
                 retval=${?}
-                msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
+                msg_debug 'Package check for "%s" returned: %d\n' ${r} ${retval}
                 if [ ${retval} -ne 0 ]
                 then
                     num_missing=$((${num_missing}+1))
-                    rpms_missing+="${r} "
-                    msg_warn 'Cassini RPM not detected: %s\n' ${r}
+                    pkgs_missing+="${r} "
+                    msg_warn 'Cassini package not detected: %s\n' ${r}
                 fi
             done
         else
-            msg_debug 'Cassini RPM list is empty.\n'
+            msg_debug 'Cassini package list is empty.\n'
         fi
 
-        if [ -n "${rpm_list_ss11_optional}" ]
+        if [ -n "${pkg_list_ss11_optional}" ]
         then
-            msg_verbose 'Checking for optional Cassini RPMs\n'
-            for r in ${rpm_list_ss11_optional}
+            msg_verbose 'Checking for optional Cassini packages\n'
+            for r in ${pkg_list_ss11_optional}
             do
-                rpm -q ${r} >/dev/null 2>&1
+                pkg_is_installed ${r}
                 retval=${?}
-                msg_debug 'RPM check for "%s" returned: %d\n' ${r} ${retval}
+                msg_debug 'Package check for "%s" returned: %d\n' ${r} ${retval}
                 if [ ${retval} -eq 0 ]
                 then
-                    msg_verbose 'Optional Cassini RPM was detected: %s\n' ${r}
+                    msg_verbose 'Optional Cassini package was detected: %s\n' ${r}
                 fi
             done
         else
-            msg_debug 'Cassini optional RPM list is empty.\n'
+            msg_debug 'Cassini optional package list is empty.\n'
         fi
     fi
 
     msg_debug 'num_missing=%d\n' ${num_missing}
     if [ ${num_missing} -ne 0 ]
     then
-        msg_warn '%d required RPMs were not detected.  Contact Support for installation steps.\n' ${num_missing}
-        msg_warn 'missing RPMs: %s\n' "${rpms_missing}"
+        msg_warn '%d required packages were not detected.  Contact Support for installation steps.\n' ${num_missing}
+        msg_warn 'missing packages: %s\n' "${pkgs_missing}"
     fi
 }
 
@@ -709,7 +775,7 @@ slingshot_diag()
     local retval=0
 
     check_for_routing_rules
-    check_for_rpms
+    check_for_packages
     for dev in ${devlist[devices]}
     do
         check_aer_errors ${dev}
@@ -1028,14 +1094,14 @@ slingshot_snapshot()
     done
 
     dmesg       >dmesg.txt
-    rpm -qa     >rpm_manifest
+    pkg_list_installed >pkg_manifest
     env         >env.txt
     slingshot-show-cxi-iommu-group >cxi_iommu_group.txt
 
-    mkdir -p rpminfo
-    for ent in ${rpm_list_all}
+    mkdir -p pkginfo
+    for ent in ${pkg_list_all}
     do
-        rpm -qli ${ent} >rpminfo/${ent}.rpminfo
+        pkg_query_info ${ent} >pkginfo/${ent}.pkginfo
     done
 
     mst_status >mst_status
