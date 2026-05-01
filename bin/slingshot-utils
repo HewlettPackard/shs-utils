@@ -1098,6 +1098,39 @@ slingshot_snapshot()
     env         >env.txt
     slingshot-show-cxi-iommu-group >cxi_iommu_group.txt
 
+    #
+    # Workload manager configuration
+    #
+    mkdir -p wlm
+    if type scontrol >/dev/null 2>&1
+    then
+        if ! scontrol show config >wlm/slurm-config.txt 2>&1
+        then
+            msg_warn 'scontrol returned non-zero\n'
+        fi
+
+    fi
+    for ent in /etc/slurm/slurm.conf /etc/slurm.conf
+    do
+        if [ -f "${ent:-}" ]
+        then
+            cp ${ent} wlm/slurm.conf
+            break
+        fi
+    done
+    if [ -f /etc/sysconfig/palsd ]
+    then
+        cp /etc/sysconfig/palsd wlm/palsd-config.txt
+    fi
+
+    #
+    # CXI service listing
+    #
+    if type cxi_service >/dev/null 2>&1
+    then
+        cxi_service list -v >cxi_service_list.txt 2>&1
+    fi
+
     mkdir -p pkginfo
     for ent in ${pkg_list_all}
     do
