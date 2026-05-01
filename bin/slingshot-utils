@@ -1083,7 +1083,8 @@ slingshot_snapshot()
                 counters_cxi_telemetry ${dev} >${dev}/counters/telemetry.txt
                 for ent in /run/cxi/${devlist[${dev},sub_dev]}/*
                 do
-                    cp ${ent} ${dev}/retry_handler/${ent##*/}
+                    # -a so that we pick up the config directory
+                    cp -a ${ent} ${dev}/retry_handler/${ent##*/}
                 done
                 journalctl --utc --unit=cxi_rh@${devlist[${dev},sub_dev]} >${dev}/retry_handler/log.txt
                 ;;
