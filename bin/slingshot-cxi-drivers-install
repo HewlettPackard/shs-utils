@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Copyright 2025 Hewlett Packard Enterprise Development LP. All rights reserved.
 
 scriptname="${0##*/}"
@@ -25,7 +25,7 @@ is_slingshot_device()
 
     case ${vendor}:${device} in
         # Only Casssini 1 and 2 are currently supported
-        ${C1_VENDOR_ID}:${C1_DEVICE_ID} | ${C2_VENDOR_ID}:${C2_DEVICE_ID})
+        "${C1_VENDOR_ID}:${C1_DEVICE_ID}" | "${C2_VENDOR_ID}:${C2_DEVICE_ID}")
             retval=0
             ;;
         *)
@@ -44,21 +44,21 @@ slingshot_iommu_groups()
     local device=''
 
     for g in $(find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 -type d | sort -V); do
-        for d in ${g}/devices/*; do
-            vendor=$(cat ${d}/vendor 2>&1)
+        for d in "${g}"/devices/*; do
+            vendor=$(cat "${d}"/vendor 2>&1)
+            if [ "${?}" -ne 0 ]; then
+                continue
+            fi
+
+            device=$(cat "${d}"/device 2>&1)
             if [ ${?} -ne 0 ]; then
                 continue
             fi
 
-            device=$(cat ${d}/device 2>&1)
-            if [ ${?} -ne 0 ]; then
-                continue
-            fi
-
-            is_slingshot_device ${vendor} ${device}
+            is_slingshot_device "${vendor}" "${device}"
             retvaltmp=${?}
             if [ ${retvaltmp} -eq 0 ]; then
-                printf '%s ' ${g}
+                printf '%s ' "${g}"
                 break
             fi
         done
@@ -104,7 +104,6 @@ iommu_group_modify()
     local before=''
     local after=''
     local retvaltmp=0
-    local p=''
     local igtype=''
     local count=0
 
@@ -161,7 +160,7 @@ iommu_group_modify()
     # outside scope fo this script.
     for g in $(slingshot_iommu_groups); do
         count=0
-        for d in ${g}/devices/*; do
+        for d in "${g}"/devices/*; do
             count=$((count+1))
         done
 
@@ -172,13 +171,13 @@ iommu_group_modify()
     done
 
     for g in $(slingshot_iommu_groups); do
-        before=$(cat ${g}/type)
-        if [ ${before} = ${igtype} ]; then
+        before=$(cat "${g}"/type)
+        if [ "${before}" = "${igtype}" ]; then
             printf "%s: INFO: %s/type is already %s\n" "${scriptname}" "${g}" "${igtype}"
             continue
         fi
 
-        printf "%s" ${igtype} > ${g}/type
+        printf "%s" "${igtype}" > "${g}"/type
         retvaltmp=${?}
         if [ ${retvaltmp} -ne 0 ]; then
             printf "%s: ERROR: failed to change %s/type from %s to %s\n" "${scriptname}" "${g}" "${before}" "${igtype}"
@@ -187,12 +186,12 @@ iommu_group_modify()
 
         # If auto is selected, no need for before after comparison since type
         # will change to what device was booted with.
-        if [ ${igtype} = "auto" ]; then
+        if [ "${igtype}" = "auto" ]; then
             continue
         fi
 
-        after=$(cat ${g}/type)
-        if [ ${after} != ${igtype} ]; then
+        after=$(cat "${g}"/type)
+        if [ "${after}" != "${igtype}" ]; then
                 printf "%s: ERROR: %s/type is %s expecting %s\n" "${scriptname}" "${g}" "${after}" "${igtype}"
                 exit 1
         else
