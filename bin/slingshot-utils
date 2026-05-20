@@ -239,7 +239,7 @@ devlist_show()
     msg_debug '${devlist[ss10_count]}=%d\n' ${devlist[ss10_count]}
     msg_debug '${devlist[ss11_count]}=%d\n' ${devlist[ss11_count]}
     msg_debug '\n'
-    for i in ${!devlist[@]}
+    for i in "${!devlist[@]}"
     do
         msg_debug '${devlist[%s]}=%s\n' "${i}" "${devlist[${i}]}"
     done
@@ -702,7 +702,7 @@ check_for_packages()
 
 check_for_openibd_failure()
 {
-    local status=$(systemctl status openibd 2>/dev/null| egrep -o 'Active: ([a-z]+)' | awk '{print $2}')
+    local status=$(systemctl status openibd 2>/dev/null| grep -E -o 'Active: ([a-z]+)' | awk '{print $2}')
 
     if [ "${status}" != "active" ]
     then
@@ -1013,7 +1013,7 @@ slingshot_snapshot()
     snapshot_dir=/tmp/slingshot-$(hostname)-$(date -u +'%Y%m%d-%H%M%SUTC')
 
     mkdir -p ${snapshot_dir}
-    cd ${snapshot_dir}
+    cd ${snapshot_dir} || { msg_warn 'Failed to cd to snapshot dir "%s"\n' "${snapshot_dir}"; return 1; }
 
     mkdir dkms
 
@@ -1026,7 +1026,12 @@ slingshot_snapshot()
         dkms_tree=/var/lib/dkms
     fi
     dkms status --verbose >dkms/dkms-status.txt 2>dkms/dkms-status-errors.txt
-    (cd "${dkms_tree}" ; tar -cf ${snapshot_dir}/dkms/dkms-logs.tar --files-from=/dev/null $(find . -type d -name log))
+    (
+        cd "${dkms_tree}" || { echo "Failed to cd to ${dkms_tree}" >&2; exit 1; }
+        tar -cf ${snapshot_dir}/dkms/dkms-logs.tar \
+            --files-from=/dev/null \
+            $(find . -type d -name log)
+    )
 
     dkms_dirs=$(cat dkms/dkms-status.txt | sed -e 's:,.*$::g' -e 's:/:-:g')
     if [ -n "${dkms_dirs}" ]
@@ -1039,7 +1044,12 @@ slingshot_snapshot()
         then
             dkms_source_tree=/usr/src
         fi
-        (cd "${dkms_source_tree}" ; tar -cf ${snapshot_dir}/dkms/dkms-confs.tar --files-from=/dev/null $(find ${dkms_dirs} -type f -name "*.conf"))
+        (
+            cd "${dkms_source_tree}" || { echo "Failed to cd to ${dkms_source_tree}" >&2; exit 1; }
+            tar -cf ${snapshot_dir}/dkms/dkms-confs.tar \
+                --files-from=/dev/null \
+                $(find ${dkms_dirs} -type f -name "*.conf")
+        )
     fi
 
     for dev in ${devlist[devices]}
@@ -1048,7 +1058,11 @@ slingshot_snapshot()
         ethtool -m ${dev} >${dev}/ethtool_m 2>&1
         ethtool -i ${dev} >${dev}/ethtool_i 2>&1
         ethtool -k ${dev} >${dev}/ethtool_k 2>&1
-        ip addr show dev ${dev} >${dev}/ip_addr
+        ethtool -l ${dev} >${dev}/ethtool_l 2>&1
+        ethtool -g ${dev} >${dev}/ethtool_g 2>&1
+        ip addr show dev ${dev} >${dev}/ip_addr 2>&1
+        ip link show dev ${dev} >${dev}/ip_link 2>&1
+        tc qdisc show dev ${dev} >${dev}/tc_qdisc 2>&1
 
         for ent in ${net_dev_entries}
         do
@@ -1100,6 +1114,17 @@ slingshot_snapshot()
     slingshot-show-cxi-iommu-group >cxi_iommu_group.txt
 
     #
+    # TCP tuning state (for Ethernet/TCP performance triage)
+    #
+    mkdir -p tcp_tuning
+    sysctl net.core.rmem_max net.core.wmem_max \
+           net.core.rmem_default net.core.wmem_default \
+           net.ipv4.tcp_rmem net.ipv4.tcp_wmem \
+           >tcp_tuning/sysctl.txt 2>&1
+    systemctl is-enabled irqbalance >tcp_tuning/irqbalance_enabled.txt 2>&1
+    systemctl is-active irqbalance >>tcp_tuning/irqbalance_enabled.txt 2>&1
+
+    #
     # Workload manager configuration
     #
     mkdir -p wlm
@@ -1142,7 +1167,7 @@ slingshot_snapshot()
     mlx_cables >mlx_cables
 
     touch modinfo_data modinfo_parameters
-    for ent in $(lsmod | egrep '^mlx|^ib|^cxi' | awk '{print $1}')
+    for ent in $(lsmod | grep -E '^mlx|^ib|^cxi' | awk '{print $1}')
     do
         #
         # get the module information
