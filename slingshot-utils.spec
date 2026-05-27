@@ -37,6 +37,11 @@ install -D -m 0755 bin/slingshot-eth-tuning.sh %{buildroot}/%{_prefix}/bin/sling
 install -D -m 0755 bin/slingshot-diag.sh %{buildroot}/%{_prefix}/bin/slingshot-diag
 install -D -m 7555 bin/slingshot-show-cxi-iommu-group %{buildroot}/%{_prefix}/bin/slingshot-show-cxi-iommu-group
 install -D -m 7555 bin/slingshot-cxi-drivers-install %{buildroot}/%{_prefix}/bin/slingshot-cxi-drivers-install
+install -D -m 0755 bin/shs-version %{buildroot}/%{_prefix}/bin/shs-version
+
+sed -i -e "s/@LABEL@/${PRODUCT_LABEL}/g" \
+       -e "s/@VERSION@/${PRODUCT_VERSION}/g" \
+       %{buildroot}/%{_prefix}/bin/shs-version
 
 %clean
 rm -rf %{buildroot}
@@ -56,6 +61,7 @@ ln -sf ${SH_BINDIR_DEFAULT}/slingshot-eth-tuning /usr/bin/slingshot-eth-tuning
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-diag /usr/bin/slingshot-diag
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-show-cxi-iommu-group /usr/bin/slingshot-show-cxi-iommu-group
 ln -sf ${SH_BINDIR_DEFAULT}/slingshot-cxi-drivers-install /usr/bin/slingshot-cxi-drivers-install
+ln -sf ${SH_BINDIR_DEFAULT}/shs-version /usr/bin/shs-version
 
 %postun
 rm -rf %{_prefix}
@@ -76,6 +82,7 @@ if [ "$(ls -l ${SH_PREFIX_DEFAULT} 2>/dev/null | sed 's#.*/##')" == "%{_build_id
         rm -f /usr/bin/slingshot-diag
         rm -f /usr/bin/slingshot-show-cxi-iommu-group
         rm -f /usr/bin/slingshot-cxi-drivers-install
+        rm -f /usr/bin/shs-version
         # delete the directories (if empty)
         rmdir ${SH_PREFIX_BASE} 2>/dev/null || true
         rmdir ${SH_PREFIX_BASE%/%{name}} 2>/dev/null || true
@@ -94,6 +101,7 @@ fi
 %{_prefix}/bin/slingshot-diag
 %{_prefix}/bin/slingshot-show-cxi-iommu-group
 %{_prefix}/bin/slingshot-cxi-drivers-install
+%{_prefix}/bin/shs-version
 %doc COPYING
 
 %changelog

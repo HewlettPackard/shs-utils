@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+
+echo "@LABEL@ v@VERSION@"
