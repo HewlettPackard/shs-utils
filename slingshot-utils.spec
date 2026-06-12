@@ -35,8 +35,8 @@ install -D -m 0755 bin/slingshot-utils %{buildroot}/%{_prefix}/bin/slingshot-uti
 install -D -m 0755 bin/slingshot-snapshot.sh %{buildroot}/%{_prefix}/bin/slingshot-snapshot
 install -D -m 0755 bin/slingshot-eth-tuning.sh %{buildroot}/%{_prefix}/bin/slingshot-eth-tuning
 install -D -m 0755 bin/slingshot-diag.sh %{buildroot}/%{_prefix}/bin/slingshot-diag
-install -D -m 7555 bin/slingshot-show-cxi-iommu-group %{buildroot}/%{_prefix}/bin/slingshot-show-cxi-iommu-group
-install -D -m 7555 bin/slingshot-cxi-drivers-install %{buildroot}/%{_prefix}/bin/slingshot-cxi-drivers-install
+install -D -m 0755 bin/slingshot-show-cxi-iommu-group %{buildroot}/%{_prefix}/bin/slingshot-show-cxi-iommu-group
+install -D -m 0755 bin/slingshot-cxi-drivers-install %{buildroot}/%{_prefix}/bin/slingshot-cxi-drivers-install
 
 %clean
 rm -rf %{buildroot}
