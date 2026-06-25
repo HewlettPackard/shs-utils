@@ -1125,6 +1125,84 @@ slingshot_snapshot()
     systemctl is-active irqbalance >>tcp_tuning/irqbalance_enabled.txt 2>&1
 
     #
+    # Kernel and boot configuration (kernel version, boot cmdline, OS release)
+    #
+    mkdir -p kernel
+    uname -a              >kernel/uname 2>&1
+    cat /proc/cmdline     >kernel/cmdline 2>&1
+    cat /etc/os-release   >kernel/os-release 2>&1
+    cat /etc/cray-release >kernel/cray-release 2>&1
+
+    #
+    # OS / scheduler jitter state (for latency-sensitive performance triage)
+    #
+    mkdir -p os_jitter
+
+    # Kernel preemption model (runtime, then the build-time config as a fallback)
+    cat /sys/kernel/debug/sched/preempt >os_jitter/preempt 2>&1
+    { grep -E 'CONFIG_PREEMPT|CONFIG_HZ' /boot/config-"$(uname -r)" 2>/dev/null \
+      || zcat /proc/config.gz 2>/dev/null | grep -E 'CONFIG_PREEMPT|CONFIG_HZ'; } \
+        >os_jitter/preempt_config 2>&1
+
+    # CPU frequency governor / driver (cpu0 detail + a per-CPU governor summary)
+    {
+        printf 'governor: ';            cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+        printf 'available_governors: '; cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors
+        printf 'driver: ';              cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver
+    } >os_jitter/cpufreq 2>&1
+    cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort | uniq -c \
+        >os_jitter/cpufreq_governor_summary 2>&1
+
+    # CPU idle (C-)states and their exit latencies (cpu0 is representative)
+    for sysfs_entry in /sys/devices/system/cpu/cpu0/cpuidle/state*
+    do
+        [ -d "${sysfs_entry}" ] || continue
+        printf '%s: name=%s latency=%sus disable=%s\n' "${sysfs_entry}" \
+            "$(cat "${sysfs_entry}/name" 2>/dev/null)" \
+            "$(cat "${sysfs_entry}/latency" 2>/dev/null)" \
+            "$(cat "${sysfs_entry}/disable" 2>/dev/null)"
+    done >os_jitter/cpuidle 2>&1
+
+    # IRQ counts per CPU (the NIC's IRQs and their CPU spread)
+    cat /proc/interrupts >os_jitter/interrupts 2>&1
+
+    # Configured IRQ affinity (smp_affinity_list per IRQ)
+    for sysfs_entry in /proc/irq/*/smp_affinity_list
+    do
+        [ -r "${sysfs_entry}" ] || continue
+        printf '%s: %s\n' "${sysfs_entry%/*}" "$(cat "${sysfs_entry}" 2>/dev/null)"
+    done >os_jitter/irq_affinity 2>&1
+
+    # Clock source
+    {
+        printf 'current: ';   cat /sys/devices/system/clocksource/clocksource0/current_clocksource
+        printf 'available: '; cat /sys/devices/system/clocksource/clocksource0/available_clocksource
+    } >os_jitter/clocksource 2>&1
+
+    # NUMA balancing, RT throttling, timer migration (jitter-relevant kernel knobs)
+    sysctl kernel.numa_balancing kernel.timer_migration \
+           kernel.sched_rt_runtime_us kernel.sched_rt_period_us >os_jitter/sysctl.txt 2>&1
+
+    # CPU isolation
+    cat /sys/devices/system/cpu/isolated    >os_jitter/cpu_isolated 2>&1
+    cat /sys/devices/system/cpu/nohz_full   >os_jitter/cpu_nohz_full 2>&1
+
+    # SMT (hyperthreading) state
+    {
+        printf 'control: '; cat /sys/devices/system/cpu/smt/control
+        printf 'active: ';  cat /sys/devices/system/cpu/smt/active
+    } >os_jitter/smt 2>&1
+
+    # Transparent huge pages (compaction stalls are a latency/jitter source)
+    {
+        printf 'enabled: '; cat /sys/kernel/mm/transparent_hugepage/enabled
+        printf 'defrag: ';  cat /sys/kernel/mm/transparent_hugepage/defrag
+    } >os_jitter/thp 2>&1
+
+    # tuned profile (if tuned is installed)
+    tuned-adm active >os_jitter/tuned.txt 2>&1
+
+    #
     # Workload manager configuration
     #
     mkdir -p wlm
