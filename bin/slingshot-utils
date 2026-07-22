@@ -274,6 +274,10 @@ slingshot_utils_usage()
     msg '    diag                    basic diagnostics\n'
     msg '    snapshot                create a snapshot\n'
     msg '\n'
+    msg 'ENVIRONMENT:\n'
+    msg '    SLINGSHOT_JOURNAL_SINCE  bound the "snapshot" journal capture window\n'
+    msg '                             (journalctl --since syntax, default "3 days ago")\n'
+    msg '\n'
 }
 
 ########################################################################
@@ -1009,6 +1013,7 @@ slingshot_snapshot()
     local dkms_tree=''
     local dkms_source_tree=''
     local dkms_dirs=''
+    local journal_since=''
 
     snapshot_dir=/tmp/slingshot-$(hostname)-$(date -u +'%Y%m%d-%H%M%SUTC')
 
@@ -1112,6 +1117,31 @@ slingshot_snapshot()
     pkg_list_installed >pkg_manifest
     env         >env.txt
     slingshot-show-cxi-iommu-group >cxi_iommu_group.txt
+
+    #
+    # System journal, current boot (system services only) plus boot history.
+    # Captures the WLM/cleanup (palsd/atomd/slurmd) job-teardown sequence,
+    # daemon crashes, and offline/hook errors that the per-device cxi_rh log
+    # and kernel dmesg do not carry. --system omits per-user session journals;
+    # ISO-precise UTC timestamps ease cross-log correlation. Boot time is
+    # emitted in UTC (TZ=UTC uptime -s) so it is directly comparable to the
+    # journal and to incident timestamps. Stored uncompressed like dmesg.txt;
+    # the final 'tar -czf' compresses it.
+    #
+    journal_since="${SLINGSHOT_JOURNAL_SINCE:-3 days ago}"
+    mkdir -p journal
+    {
+        printf '### journal window: --since="%s" (override with SLINGSHOT_JOURNAL_SINCE)\n' "${journal_since}"
+        journalctl -b --system --since="${journal_since}" -o short-iso-precise --utc --no-pager \
+            || echo "### journalctl -b exited non-zero ($?)"
+    } >journal/current-boot.txt 2>&1
+    {
+        echo '### journalctl --list-boots (retained boot history)'
+        journalctl --list-boots --utc --no-pager
+        echo '### uptime -s UTC (boot time) and /proc/uptime (seconds since boot)'
+        TZ=UTC uptime -s
+        cat /proc/uptime
+    } >journal/boot-history.txt 2>&1
 
     #
     # TCP tuning state (for Ethernet/TCP performance triage)
