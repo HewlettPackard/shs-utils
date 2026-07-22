@@ -1305,7 +1305,11 @@ slingshot_snapshot()
         find ${snapshot_dir}
     fi
 
-    tar -cvzf ${snapshot_dir}.tgz --transform='s:tmp/::g' ${snapshot_dir}
+    if ! tar -cvzf ${snapshot_dir}.tgz --transform='s:tmp/::g' ${snapshot_dir}
+    then
+        msg_error 'Failed to create snapshot archive "%s.tgz" (tar exited non-zero; check free space in the snapshot directory)\n' "${snapshot_dir}"
+        return 1
+    fi
 
     #rm -rf ${snapshot_dir}
 
