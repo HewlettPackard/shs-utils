@@ -50,6 +50,7 @@ Usage:
   $scriptname --set value [--device <network_device>] [options]
   $scriptname --set recommendation [--device <network_device>]
   Add --dry-run to any --set command to show commands without executing
+  Without --device, all hsn* interfaces are used. --device accepts any interface (e.g. ens2f1).
 
 Available Set Options:
   --mtu <value>              Set MTU value
@@ -335,9 +336,11 @@ show_system_wide_settings() {
     echo "Command: sysctl net.ipv4.tcp_wmem"
     sysctl net.ipv4.tcp_wmem
 
-    echo "NUMA Node CPU Count (Local to HSN devices):"
-    echo "Command: for nic in /sys/class/net/hsn*; do [ -e \"\$nic\" ] && echo \"Node \$(cat \$nic/device/numa_node): \$(numactl --hardware | grep -A1 \"node \$(cat \$nic/device/numa_node) cpus:\" | head -n1 | awk '{print NF-3 \" CPUs\"}') [\$(basename \$nic)]\"; done | sort -u"
-    for nic in /sys/class/net/hsn*; do
+    local nics=("$NET_PATH"/hsn*)
+    [[ -n "$DEVICE_NAME" ]] && nics=("$NET_PATH/$DEVICE_NAME")
+    echo "NUMA Node CPU Count (Local to network devices):"
+    echo "Command: for nic in /sys/class/net/${DEVICE_NAME:-hsn*}; do [ -e \"\$nic\" ] && echo \"Node \$(cat \$nic/device/numa_node): \$(numactl --hardware | grep -A1 \"node \$(cat \$nic/device/numa_node) cpus:\" | head -n1 | awk '{print NF-3 \" CPUs\"}') [\$(basename \$nic)]\"; done | sort -u"
+    for nic in "${nics[@]}"; do
         [ -e "$nic" ] && echo "Node $(cat $nic/device/numa_node): $(numactl --hardware | grep -A1 "node $(cat $nic/device/numa_node) cpus:" | head -n1 | awk '{print NF-3 " CPUs"}') [$(basename $nic)]"
     done | sort -u
 }
@@ -1029,7 +1032,7 @@ get_recommended_settings() {
 
     echo
     echo "To apply these settings, use:"
-    echo "$0 --set recommendation [--device <hsn_device>] [--dry-run]"
+    echo "$0 --set recommendation [--device <network_device>] [--dry-run]"
 }
 
 # Function to handle all set operations
@@ -1209,12 +1212,14 @@ set_parameters() {
 set_recommended_settings() {
     local device=$1
 
-    # Check if any HSN interfaces exist
-    local interfaces=$(ip -o link show | awk -F': ' '$2 != "lo" {print $2}' | grep -E '^hsn[0-9]+')
-    if [[ -z "$interfaces" ]]; then
-        echo "Error: No HSN interfaces found. Available interfaces are:"
-        ip -o link show | awk -F': ' '$2 != "lo" {print $2}'
-        return 1
+    local interfaces=""
+    if [[ -z "$device" ]]; then
+        interfaces=$(ip -o link show | awk -F': ' '$2 != "lo" {print $2}' | grep -E '^hsn[0-9]+')
+        if [[ -z "$interfaces" ]]; then
+            echo "Error: No HSN interfaces found. Available interfaces are:"
+            ip -o link show | awk -F': ' '$2 != "lo" {print $2}'
+            return 1
+        fi
     fi
 
     # Set system-wide parameters first
@@ -1467,6 +1472,11 @@ main() {
     if ! $GET && ! $SET; then
         echo "Error: Must specify either --get value/recommendation or --set value"
         print_usage
+    fi
+
+    if [[ -n "$DEVICE_NAME" && ! -e "$NET_PATH/$DEVICE_NAME" ]]; then
+        echo "Error: Network device $DEVICE_NAME not found"
+        exit 1
     fi
 
     # Check root privileges
